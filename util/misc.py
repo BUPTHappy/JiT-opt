@@ -9,6 +9,7 @@ import copy
 import torch
 import torch.distributed as dist
 
+#分布式训练中相关工具函数
 
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a
@@ -236,7 +237,7 @@ def init_distributed_mode(args):
     torch.distributed.barrier()
     setup_for_distributed(args.rank == 0)
 
-
+#区分哪些需要权重衰退，哪些不需要
 def add_weight_decay(model, weight_decay=0, skip_list=()):
     decay = []
     no_decay = []

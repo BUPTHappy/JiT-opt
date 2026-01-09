@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from model_jit import JiT_models
 
+#完整的扩散模型训练和生成系统
 
 class Denoiser(nn.Module):
     def __init__(
@@ -9,7 +10,7 @@ class Denoiser(nn.Module):
         args
     ):
         super().__init__()
-        self.net = JiT_models[args.model](
+        self.net = JiT_models[args.model](  #通过args.model选择模型架构
             input_size=args.img_size,
             in_channels=3,
             num_classes=args.class_num,
@@ -19,13 +20,13 @@ class Denoiser(nn.Module):
         self.img_size = args.img_size
         self.num_classes = args.class_num
 
-        self.label_drop_prob = args.label_drop_prob
-        self.P_mean = args.P_mean
-        self.P_std = args.P_std
-        self.t_eps = args.t_eps
-        self.noise_scale = args.noise_scale
+        self.label_drop_prob = args.label_drop_prob #标签drop概率
+        self.P_mean = args.P_mean #时间步采样的均值
+        self.P_std = args.P_std #时间步采样的标准差
+        self.t_eps = args.t_eps #时间步的最小值
+        self.noise_scale = args.noise_scale  #噪声缩放因子（控制添加到图像中的噪声强度）
 
-        # ema
+        # ema 对模型参数做指数滑动平均
         self.ema_decay1 = args.ema_decay1
         self.ema_decay2 = args.ema_decay2
         self.ema_params1 = None
@@ -34,8 +35,8 @@ class Denoiser(nn.Module):
         # generation hyper params
         self.method = args.sampling_method
         self.steps = args.num_sampling_steps
-        self.cfg_scale = args.cfg
-        self.cfg_interval = (args.interval_min, args.interval_max)
+        self.cfg_scale = args.cfg #CFG缩放因子
+        self.cfg_interval = (args.interval_min, args.interval_max) #CFG间隔
 
     def drop_labels(self, labels):
         drop = torch.rand(labels.shape[0], device=labels.device) < self.label_drop_prob
@@ -46,20 +47,20 @@ class Denoiser(nn.Module):
         z = torch.randn(n, device=device) * self.P_std + self.P_mean
         return torch.sigmoid(z)
 
-    def forward(self, x, labels):
+    def forward(self, x, labels): #JIT论文中提到的选用的理论公式
         labels_dropped = self.drop_labels(labels) if self.training else labels
 
         t = self.sample_t(x.size(0), device=x.device).view(-1, *([1] * (x.ndim - 1)))
         e = torch.randn_like(x) * self.noise_scale
 
-        z = t * x + (1 - t) * e
-        v = (x - z) / (1 - t).clamp_min(self.t_eps)
+        z = t * x + (1 - t) * e #创建加噪图像 论文中的公式
+        v = (x - z) / (1 - t).clamp_min(self.t_eps) 
 
-        x_pred = self.net(z, t.flatten(), labels_dropped)
+        x_pred = self.net(z, t.flatten(), labels_dropped) #net.forward
         v_pred = (x_pred - z) / (1 - t).clamp_min(self.t_eps)
 
         # l2 loss
-        loss = (v - v_pred) ** 2
+        loss = (v - v_pred) ** 2 #v-loss
         loss = loss.mean(dim=(1, 2, 3)).mean()
 
         return loss
@@ -68,16 +69,19 @@ class Denoiser(nn.Module):
     def generate(self, labels):
         device = labels.device
         bsz = labels.size(0)
-        z = self.noise_scale * torch.randn(bsz, 3, self.img_size, self.img_size, device=device)
+
+        #1. #初始化为纯噪声
+        z = self.noise_scale * torch.randn(bsz, 3, self.img_size, self.img_size, device=device) #3个通道，图像大小，设备
         timesteps = torch.linspace(0.0, 1.0, self.steps+1, device=device).view(-1, *([1] * z.ndim)).expand(-1, bsz, -1, -1, -1)
 
-        if self.method == "euler":
+        #采样方法选择
+        if self.method == "euler": # 一阶精度
             stepper = self._euler_step
-        elif self.method == "heun":
+        elif self.method == "heun": # 二阶精度（更准确但慢2倍）
             stepper = self._heun_step
         else:
             raise NotImplementedError
-
+    
         # ode
         for i in range(self.steps - 1):
             t = timesteps[i]
@@ -88,8 +92,8 @@ class Denoiser(nn.Module):
         return z
 
     @torch.no_grad()
-    def _forward_sample(self, z, t, labels):
-        # conditional
+    def _forward_sample(self, z, t, labels): # 告诉我"从当前状态 z 往哪个方向走"，计算速度场
+        # conditional —— 知道要生成什么，有label
         x_cond = self.net(z, t.flatten(), labels)
         v_cond = (x_cond - z) / (1.0 - t).clamp_min(self.t_eps)
 
@@ -100,24 +104,25 @@ class Denoiser(nn.Module):
         # cfg interval
         low, high = self.cfg_interval
         interval_mask = (t < high) & ((low == 0) | (t > low))
-        cfg_scale_interval = torch.where(interval_mask, self.cfg_scale, 1.0)
+        cfg_scale_interval = torch.where(interval_mask, self.cfg_scale, 1.0) #判断是否在CFG间隔内，在则使用CFG缩放因子，否则使用1.0
 
         return v_uncond + cfg_scale_interval * (v_cond - v_uncond)
 
     @torch.no_grad()
     def _euler_step(self, z, t, t_next, labels):
         v_pred = self._forward_sample(z, t, labels)
-        z_next = z + (t_next - t) * v_pred
+        z_next = z + (t_next - t) * v_pred # z(t+Δt) ≈ z(t) + Δt * v(t) 
         return z_next
 
     @torch.no_grad()
     def _heun_step(self, z, t, t_next, labels):
         v_pred_t = self._forward_sample(z, t, labels)
-
         z_next_euler = z + (t_next - t) * v_pred_t
+
+        # 在预测点再算一次速度场，获得更准确的预测
         v_pred_t_next = self._forward_sample(z_next_euler, t_next, labels)
 
-        v_pred = 0.5 * (v_pred_t + v_pred_t_next)
+        v_pred = 0.5 * (v_pred_t + v_pred_t_next) # 用两个速度的平均值
         z_next = z + (t_next - t) * v_pred
         return z_next
 

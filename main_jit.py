@@ -120,7 +120,7 @@ def main(args):
     device = torch.device(args.device)
 
     # Set seeds for reproducibility
-    seed = args.seed + misc.get_rank()
+    seed = args.seed + misc.get_rank() #每个进程使用不同的种子，保证可复现性且防止各进程数据完全一致
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -173,14 +173,14 @@ def main(args):
 
     eff_batch_size = args.batch_size * misc.get_world_size()
     if args.lr is None:  # only base_lr (blr) is specified
-        args.lr = args.blr * eff_batch_size / 256
+        args.lr = args.blr * eff_batch_size / 256  #更大的批次通常需要更大的学习率
 
     print("Base lr: {:.2e}".format(args.lr * 256 / eff_batch_size))
     print("Actual lr: {:.2e}".format(args.lr))
     print("Effective batch size: %d" % eff_batch_size)
 
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-    model_without_ddp = model.module
+    model_without_ddp = model.module #DDP 包装后，原始模型被存储在 model.module 中
 
     # Set up optimizer with weight decay adjustment for bias and norm layers
     param_groups = misc.add_weight_decay(model_without_ddp, args.weight_decay)
@@ -210,7 +210,7 @@ def main(args):
         print("Training from scratch")
 
     # Evaluate generation
-    if args.evaluate_gen:
+    if args.evaluate_gen:  #是用这一个参数区分出eval和train的，因为都写在main里了
         print("Evaluating checkpoint at {} epoch".format(args.start_epoch))
         with torch.random.fork_rng():
             torch.manual_seed(seed)
@@ -223,12 +223,13 @@ def main(args):
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
-            data_loader_train.sampler.set_epoch(epoch)
+            data_loader_train.sampler.set_epoch(epoch) #确保每个 epoch 的数据顺序不同
 
+        #训练
         train_one_epoch(model, model_without_ddp, data_loader_train, optimizer, device, epoch, log_writer=log_writer, args=args)
 
         # Save checkpoint periodically
-        if epoch % args.save_last_freq == 0 or epoch + 1 == args.epochs:
+        if epoch % args.save_last_freq == 0 or epoch + 1 == args.epochs: #最新模型
             misc.save_model(
                 args=args,
                 model_without_ddp=model_without_ddp,
@@ -237,7 +238,7 @@ def main(args):
                 epoch_name="last"
             )
 
-        if epoch % 100 == 0 and epoch > 0:
+        if epoch % 100 == 0 and epoch > 0: #定期保存
             misc.save_model(
                 args=args,
                 model_without_ddp=model_without_ddp,

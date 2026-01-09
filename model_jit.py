@@ -214,7 +214,7 @@ class JiT(nn.Module):
         hidden_size=1024,
         depth=24,
         num_heads=16,
-        mlp_ratio=4.0,
+        mlp_ratio=4.0,  # MLP 隐藏层维度 = hidden_size * mlp_ratio
         attn_drop=0.0,
         proj_drop=0.0,
         num_classes=1000,
