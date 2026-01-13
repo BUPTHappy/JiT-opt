@@ -90,6 +90,22 @@ def get_args_parser():
                         help='Path to the dataset')
     parser.add_argument('--class_num', default=1000, type=int)
 
+    # video frame generation
+    parser.add_argument('--max_condition_frames', default=2, type=int,
+                        help='Number of condition frames for video generation')
+    parser.add_argument('--text_latent_dim', default=512, type=int,
+                        help='Dimension of text latents (CLIP)')
+    parser.add_argument('--use_text_condition', action='store_true',
+                        help='Use text condition for CFG')
+    parser.add_argument('--text_drop_prob', default=0.1, type=float,
+                        help='Text latent dropout probability for CFG training')
+    parser.add_argument('--use_condition_frames', action='store_true',
+                        help='Use condition frames instead of labels')
+    parser.add_argument('--dataset_names', type=str, default='cup_arrangement_0,towel_folding_0,mouse_arrangement_0',
+                        help='Comma-separated list of dataset names for multi-task training')
+    parser.add_argument('--used_episode_indices_file', type=str, default='',
+                        help='JSON file specifying which episodes to use (optional)')
+    
     # checkpointing
     parser.add_argument('--output_dir', default='./output_dir',
                         help='Directory to save outputs (empty for no saving)')
@@ -136,15 +152,33 @@ def main(args):
     else:
         log_writer = None
 
-    # Data augmentation transforms
-    transform_train = transforms.Compose([
-        transforms.Lambda(lambda img: center_crop_arr(img, args.img_size)),
-        transforms.RandomHorizontalFlip(),
-        transforms.PILToTensor()
-    ])
+    # Data loading: 支持两种模式
+    if args.use_condition_frames:
+        # 视频帧模式：使用自定义数据集
+        from dataset.umi_video_dataset import UmiVideoDataset
+        
+        # 解析数据集名称列表
+        dataset_names = [name.strip() for name in args.dataset_names.split(',') if name.strip()]
+        
+        dataset_train = UmiVideoDataset(
+            dataset_root_dir=args.data_path,
+            max_condition_frames=args.max_condition_frames,
+            image_size=args.img_size,
+            split='train',
+            dataset_names=dataset_names,
+            used_episode_indices_file=args.used_episode_indices_file if args.used_episode_indices_file else None
+        )
+        print(f"Video dataset: {len(dataset_train)} samples")
+    else:
+        # ImageNet模式（兼容性）
+        transform_train = transforms.Compose([
+            transforms.Lambda(lambda img: center_crop_arr(img, args.img_size)),
+            transforms.RandomHorizontalFlip(),
+            transforms.PILToTensor()
+        ])
 
-    dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
-    print(dataset_train)
+        dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+        print(dataset_train)
 
     sampler_train = torch.utils.data.DistributedSampler(
         dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True

@@ -20,22 +20,44 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 20
 
-    optimizer.zero_grad() #清零梯度
+    optimizer.zero_grad()
 
     if log_writer is not None:
         print('log_dir: {}'.format(log_writer.log_dir))
 
-    for data_iter_step, (x, labels) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         # per iteration (instead of per epoch) lr scheduler
         lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
-        # normalize image to [-1, 1]
-        x = x.to(device, non_blocking=True).to(torch.float32).div_(255)
-        x = x * 2.0 - 1.0
-        labels = labels.to(device, non_blocking=True)
+        # 处理数据：支持两种模式
+        # 模式1: 视频帧数据 (condition_frames, target_frame, text_latents)
+        # 模式2: ImageNet数据 (x, labels) - 兼容性
+        if isinstance(batch, dict):
+            # 视频帧模式
+            condition_frames = batch['condition_frames'].to(device, non_blocking=True)
+            target_frame = batch['target_frame'].to(device, non_blocking=True)
+            
+            # normalize to [-1, 1]
+            condition_frames = condition_frames.to(torch.float32) / 127.5 - 1.0
+            target_frame = target_frame.to(torch.float32) / 127.5 - 1.0
+            
+            text_latents = None
+            if 'text_latents' in batch and batch['text_latents'] is not None:
+                text_latents = batch['text_latents'].to(device, non_blocking=True)
+            
+            labels = None
+        else:
+            # ImageNet模式（兼容性）
+            x, labels = batch
+            x = x.to(device, non_blocking=True).to(torch.float32).div_(255)
+            x = x * 2.0 - 1.0
+            labels = labels.to(device, non_blocking=True)
+            condition_frames = None
+            target_frame = x
+            text_latents = None
 
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-            loss = model(x, labels) #forward
+            loss = model(target_frame, labels=labels, condition_frames=condition_frames, text_latents=text_latents)
 
         loss_value = loss.item()
         if not math.isfinite(loss_value):
@@ -43,19 +65,19 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
             sys.exit(1)
 
         optimizer.zero_grad()
-        loss.backward() #计算梯度
-        optimizer.step() #更新参数
+        loss.backward()
+        optimizer.step()
 
         torch.cuda.synchronize()
 
-        model_without_ddp.update_ema() #更新ema模型参数
+        model_without_ddp.update_ema()
 
         metric_logger.update(loss=loss_value)
         lr = optimizer.param_groups[0]["lr"]
         metric_logger.update(lr=lr)
 
         loss_value_reduce = misc.all_reduce_mean(loss_value)
-        
+
         if log_writer is not None:
             # Use epoch_1000x as the x-axis in TensorBoard to calibrate curves.
             epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
@@ -94,23 +116,32 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
     print("Switch to ema")
     model_without_ddp.load_state_dict(ema_state_dict) #把字典中的参数加载到模型
 
-    # ensure that the number of images per class is equal.
-    class_num = args.class_num
-    assert args.num_images % class_num == 0, "Number of images per class must be the same"
-    class_label_gen_world = np.arange(0, class_num).repeat(args.num_images // class_num)
-    class_label_gen_world = np.hstack([class_label_gen_world, np.zeros(50000)]) #填充缓冲区，避免索引越界
+    # 生成模式：支持条件帧生成或label生成
+    use_condition_frames = getattr(args, 'use_condition_frames', False)
+    
+    if use_condition_frames:
+        # 视频帧生成模式：需要从验证集获取条件帧
+        # 这里简化处理，实际应该从验证集dataloader获取
+        print("Warning: Condition frame generation mode - need validation dataloader")
+        # 暂时跳过生成，或者你可以添加从验证集采样的逻辑
+        return
+    else:
+        # ImageNet label生成模式（兼容性）
+        class_num = args.class_num
+        assert args.num_images % class_num == 0, "Number of images per class must be the same"
+        class_label_gen_world = np.arange(0, class_num).repeat(args.num_images // class_num)
+        class_label_gen_world = np.hstack([class_label_gen_world, np.zeros(50000)])
 
-    for i in range(num_steps):
-        print("Generation step {}/{}".format(i, num_steps))
+        for i in range(num_steps):
+            print("Generation step {}/{}".format(i, num_steps))
 
-        start_idx = world_size * batch_size * i + local_rank * batch_size
-        end_idx = start_idx + batch_size
+            start_idx = world_size * batch_size * i + local_rank * batch_size
+            end_idx = start_idx + batch_size
+            labels_gen = class_label_gen_world[start_idx:end_idx]
+            labels_gen = torch.Tensor(labels_gen).long().cuda()
 
-        labels_gen = class_label_gen_world[start_idx:end_idx]
-        labels_gen = torch.Tensor(labels_gen).long().cuda()
-
-        with torch.amp.autocast('cuda', dtype=torch.bfloat16): #自动混合精度
-            sampled_images = model_without_ddp.generate(labels_gen)
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                sampled_images = model_without_ddp.generate(labels=labels_gen)
 
         torch.distributed.barrier() #等待所有进程到达这一点
 

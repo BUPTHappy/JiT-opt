@@ -10,17 +10,28 @@ class Denoiser(nn.Module):
         args
     ):
         super().__init__()
+        max_condition_frames = getattr(args, 'max_condition_frames', 2)
+        text_latent_dim = getattr(args, 'text_latent_dim', 512)
+        use_text_condition = getattr(args, 'use_text_condition', False)
+
         self.net = JiT_models[args.model](  #通过args.model选择模型架构
             input_size=args.img_size,
             in_channels=3,
             num_classes=args.class_num,
             attn_drop=args.attn_dropout,
             proj_drop=args.proj_dropout,
+            max_condition_frames=max_condition_frames,
+            text_latent_dim=text_latent_dim,
+            use_text_condition=use_text_condition,
         )
         self.img_size = args.img_size
         self.num_classes = args.class_num
-
+        self.max_condition_frames = max_condition_frames
+        self.use_text_condition = use_text_condition
+        
         self.label_drop_prob = args.label_drop_prob #标签drop概率
+        self.text_drop_prob = getattr(args, 'text_drop_prob', 0.1)
+
         self.P_mean = args.P_mean #时间步采样的均值
         self.P_std = args.P_std #时间步采样的标准差
         self.t_eps = args.t_eps #时间步的最小值
@@ -42,33 +53,71 @@ class Denoiser(nn.Module):
         drop = torch.rand(labels.shape[0], device=labels.device) < self.label_drop_prob
         out = torch.where(drop, torch.full_like(labels, self.num_classes), labels)
         return out
+    
+    def drop_text_latents(self, text_latents):
+        """Drop text latents for CFG training"""
+        if text_latents is None:
+            return None, None  # 返回两个None
+        drop = torch.rand(text_latents.shape[0], device=text_latents.device) < self.text_drop_prob
+        return text_latents, drop
 
     def sample_t(self, n: int, device=None):
         z = torch.randn(n, device=device) * self.P_std + self.P_mean
         return torch.sigmoid(z)
 
-    def forward(self, x, labels): #JIT论文中提到的选用的理论公式
-        labels_dropped = self.drop_labels(labels) if self.training else labels
+    def forward(self, x, labels=None, condition_frames=None, text_latents=None): #JIT论文中提到的选用的理论公式
+        # handle labels (for compatibility)
+        labels_dropped = None
+        if labels is not None:
+            labels_dropped = self.drop_labels(labels) if self.training else labels
+        
+        # handle text latents (for CFG)
+        text_latents_dropped = None
+        if text_latents is not None and self.use_text_condition:
+            if self.training:
+                text_latents_clean, drop_mask = self.drop_text_latents(text_latents)
+                if drop_mask is not None:  # 添加检查
+                    # 对于drop的样本，设置为零向量（无条件）
+                    text_latents_dropped = torch.where(
+                        drop_mask.unsqueeze(-1).expand_as(text_latents),
+                        torch.zeros_like(text_latents),
+                        text_latents
+                    )
+                    # 如果全部drop，设置为None
+                    if drop_mask.all():
+                        text_latents_dropped = None
+                else:
+                    text_latents_dropped = text_latents
+            else:
+                text_latents_dropped = text_latents
 
         t = self.sample_t(x.size(0), device=x.device).view(-1, *([1] * (x.ndim - 1)))
         e = torch.randn_like(x) * self.noise_scale
 
-        z = t * x + (1 - t) * e #创建加噪图像 论文中的公式
-        v = (x - z) / (1 - t).clamp_min(self.t_eps) 
+        z = t * x + (1 - t) * e
+        v = (x - z) / (1 - t).clamp_min(self.t_eps)
 
-        x_pred = self.net(z, t.flatten(), labels_dropped) #net.forward
+        x_pred = self.net(z, t.flatten(), y=labels_dropped, 
+                         condition_frames=condition_frames, 
+                         text_latents=text_latents_dropped)
         v_pred = (x_pred - z) / (1 - t).clamp_min(self.t_eps)
 
         # l2 loss
-        loss = (v - v_pred) ** 2 #v-loss
+        loss = (v - v_pred) ** 2
         loss = loss.mean(dim=(1, 2, 3)).mean()
 
         return loss
 
     @torch.no_grad()
-    def generate(self, labels):
-        device = labels.device
-        bsz = labels.size(0)
+    def generate(self, condition_frames=None, text_latents=None, labels=None):
+        if condition_frames is not None:
+            device = condition_frames.device
+            bsz = condition_frames.shape[0]
+        elif labels is not None:
+            device = labels.device
+            bsz = labels.size(0)
+        else:
+            raise ValueError("Either condition_frames or labels must be provided")
 
         #1. #初始化为纯噪声
         z = self.noise_scale * torch.randn(bsz, 3, self.img_size, self.img_size, device=device) #3个通道，图像大小，设备
@@ -86,19 +135,37 @@ class Denoiser(nn.Module):
         for i in range(self.steps - 1):
             t = timesteps[i]
             t_next = timesteps[i + 1]
-            z = stepper(z, t, t_next, labels)
+            z = stepper(z, t, t_next, condition_frames=condition_frames, 
+                       text_latents=text_latents, labels=labels)
         # last step euler
-        z = self._euler_step(z, timesteps[-2], timesteps[-1], labels)
+        z = self._euler_step(z, timesteps[-2], timesteps[-1], 
+                           condition_frames=condition_frames,
+                           text_latents=text_latents, labels=labels)
         return z
 
     @torch.no_grad()
-    def _forward_sample(self, z, t, labels): # 告诉我"从当前状态 z 往哪个方向走"，计算速度场
+    def _forward_sample(self, z, t, condition_frames=None, text_latents=None, labels=None): # 告诉我"从当前状态 z 往哪个方向走"，计算速度场
         # conditional —— 知道要生成什么，有label
-        x_cond = self.net(z, t.flatten(), labels)
+        x_cond = self.net(z, t.flatten(), y=labels, 
+                         condition_frames=condition_frames,
+                         text_latents=text_latents)
         v_cond = (x_cond - z) / (1.0 - t).clamp_min(self.t_eps)
 
-        # unconditional
-        x_uncond = self.net(z, t.flatten(), torch.full_like(labels, self.num_classes))
+        # unconditional prediction
+        if text_latents is not None and self.use_text_condition:
+            # CFG with text: unconditional = text_latents=None
+            x_uncond = self.net(z, t.flatten(), y=labels,
+                               condition_frames=condition_frames,
+                               text_latents=None)
+        elif labels is not None:
+            # CFG with labels: unconditional = null class
+            x_uncond = self.net(z, t.flatten(), torch.full_like(labels, self.num_classes),
+                               condition_frames=condition_frames,
+                               text_latents=None)
+        else:
+            # No CFG, just use conditional
+            return v_cond
+        
         v_uncond = (x_uncond - z) / (1.0 - t).clamp_min(self.t_eps)
 
         # cfg interval
@@ -109,20 +176,23 @@ class Denoiser(nn.Module):
         return v_uncond + cfg_scale_interval * (v_cond - v_uncond)
 
     @torch.no_grad()
-    def _euler_step(self, z, t, t_next, labels):
-        v_pred = self._forward_sample(z, t, labels)
-        z_next = z + (t_next - t) * v_pred # z(t+Δt) ≈ z(t) + Δt * v(t) 
+    def _euler_step(self, z, t, t_next, condition_frames=None, text_latents=None, labels=None):
+        v_pred = self._forward_sample(z, t, condition_frames=condition_frames,
+                                     text_latents=text_latents, labels=labels)
+        z_next = z + (t_next - t) * v_pred
         return z_next
 
     @torch.no_grad()
-    def _heun_step(self, z, t, t_next, labels):
-        v_pred_t = self._forward_sample(z, t, labels)
+    def _heun_step(self, z, t, t_next, condition_frames=None, text_latents=None, labels=None):
+        v_pred_t = self._forward_sample(z, t, condition_frames=condition_frames,
+                                       text_latents=text_latents, labels=labels)
+
         z_next_euler = z + (t_next - t) * v_pred_t
+        v_pred_t_next = self._forward_sample(z_next_euler, t_next, 
+                                            condition_frames=condition_frames,
+                                            text_latents=text_latents, labels=labels)
 
-        # 在预测点再算一次速度场，获得更准确的预测
-        v_pred_t_next = self._forward_sample(z_next_euler, t_next, labels)
-
-        v_pred = 0.5 * (v_pred_t + v_pred_t_next) # 用两个速度的平均值
+        v_pred = 0.5 * (v_pred_t + v_pred_t_next)
         z_next = z + (t_next - t) * v_pred
         return z_next
 

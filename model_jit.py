@@ -76,7 +76,7 @@ class TimestepEmbedder(nn.Module):
         t_emb = self.mlp(t_freq)
         return t_emb
 
-
+# 标签嵌入器（修改）
 class LabelEmbedder(nn.Module):
     """
     Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
@@ -89,6 +89,14 @@ class LabelEmbedder(nn.Module):
     def forward(self, labels):
         embeddings = self.embedding_table(labels)
         return embeddings
+
+class TextConditioner(nn.Module):
+    def __init__(self, text_latent_dim, hidden_size):
+        super().__init__()
+        self.proj = nn.Linear(text_latent_dim, hidden_size)
+    
+    def forward(self, text_latents):
+        return self.proj(text_latents)
 
 
 def scaled_dot_product_attention(query, key, value, dropout_p=0.0) -> torch.Tensor:
@@ -220,7 +228,10 @@ class JiT(nn.Module):
         num_classes=1000,
         bottleneck_dim=128,
         in_context_len=32,
-        in_context_start=8
+        in_context_start=8,
+        max_condition_frames=2, # 窗口条件帧数
+        text_latent_dim=512, # 文本特征维度
+        use_text_condition=False 
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -236,6 +247,13 @@ class JiT(nn.Module):
         # time and class embed
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size)
+        self.max_condition_frames = max_condition_frames
+        self.use_text_condition = use_text_condition
+
+        if use_text_condition:
+            self.text_embedder = TextConditioner(text_latent_dim, hidden_size)
+        else:
+            self.text_embedder = None    
 
         # linear embed
         self.x_embedder = BottleneckPatchEmbed(input_size, patch_size, in_channels, bottleneck_dim, hidden_size, bias=True)
@@ -243,6 +261,13 @@ class JiT(nn.Module):
         # use fixed sin-cos embedding
         num_patches = self.x_embedder.num_patches
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
+
+        num_patches_per_frame = (input_size // patch_size) ** 2
+        #动态计算in_context_len:条件帧数量*每帧patch数
+        if max_condition_frames > 0:
+            self.condition_in_context_len = max_condition_frames * num_patches_per_frame
+        else:
+            self.condition_in_context_len = 0
 
         # in-context cls token
         if self.in_context_len > 0:
@@ -257,10 +282,11 @@ class JiT(nn.Module):
             pt_seq_len=hw_seq_len,
             num_cls_token=0
         )
+        total_incontext_tokens = max(self.in_context_len, self.condition_in_context_len)
         self.feat_rope_incontext = VisionRotaryEmbeddingFast(
             dim=half_head_dim,
             pt_seq_len=hw_seq_len,
-            num_cls_token=self.in_context_len
+            num_cls_token=total_incontext_tokens
         )
 
         # transformer
@@ -328,30 +354,65 @@ class JiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, x, t, y):
+    def forward(self, x, t, y=None, condition_frames=None, text_latents=None):
         """
         x: (N, C, H, W)
         t: (N,)
         y: (N,)
+        condition_frames: (N, num_condition_frames, C, H, W) - condition frames
+        text_latents: (N, text_latent_dim) - text condition for CFG (optional)
         """
         # class and time embeddings
         t_emb = self.t_embedder(t)
-        y_emb = self.y_embedder(y)
-        c = t_emb + y_emb
+        c = t_emb
+
+        if text_latents is not None and self.text_embedder is not None:
+            text_emb = self.text_embedder(text_latents)
+            c = c + text_emb
+        elif y is not None:
+            y_emb = self.y_embedder(y)
+            c = c + y_emb
 
         # forward JiT
         x = self.x_embedder(x)
         x += self.pos_embed
 
+        condition_tokens = None
+        condition_len = 0
+
+        if condition_frames is not None and self.max_condition_frames > 0:
+            num_condition_frames = condition_frames.shape[1]
+            condition_tokens_list = []
+            for i in range(num_condition_frames):
+                cond_frame = condition_frames[:,i]
+                cond_tokens = self.x_embedder(cond_frame)
+                cond_tokens += self.pos_embed
+                condition_tokens_list.append(cond_tokens)
+            condition_tokens = torch.cat(condition_tokens_list, dim=1)
+            condition_len = condition_tokens.shape[1]
+
         for i, block in enumerate(self.blocks):
-            # in-context
-            if self.in_context_len > 0 and i == self.in_context_start:
+            if condition_tokens is not None and i == self.in_context_start:
+                x = torch.cat([condition_tokens, x], dim=1)
+            elif self.in_context_len > 0 and i == self.in_context_start and y is not None:
+                y_emb = self.y_embedder(y)
                 in_context_tokens = y_emb.unsqueeze(1).repeat(1, self.in_context_len, 1)
                 in_context_tokens += self.in_context_posemb
                 x = torch.cat([in_context_tokens, x], dim=1)
-            x = block(x, c, self.feat_rope if i < self.in_context_start else self.feat_rope_incontext)
+            
+            if condition_tokens is not None and i >= self.in_context_start:
+                rope = self.feat_rope_incontext
+            elif self.in_context_len > 0 and i >= self.in_context_start:
+                rope = self.feat_rope_incontext
+            else:
+                rope = self.feat_rope
+            
+            x = block(x, c, rope)
 
-        x = x[:, self.in_context_len:]
+        if condition_tokens is not None:
+            x = x[:, condition_len:]
+        elif self.in_context_len > 0:
+            x = x[:, self.in_context_len:]
 
         x = self.final_layer(x, c)
         output = self.unpatchify(x, self.patch_size)
@@ -360,28 +421,100 @@ class JiT(nn.Module):
 
 
 def JiT_B_16(**kwargs):
-    return JiT(depth=12, hidden_size=768, num_heads=12,
-               bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=16, **kwargs)
+    default_kwargs = {
+        'depth': 12,
+        'hidden_size': 768,
+        'num_heads': 12,
+        'bottleneck_dim': 128,
+        'in_context_len': 32,
+        'in_context_start': 4,
+        'patch_size': 16,
+        'max_condition_frames': 2,
+        'text_latent_dim': 512,
+        'use_text_condition': False,
+    }
+    default_kwargs.update(kwargs)
+    return JiT(**default_kwargs)
 
 def JiT_B_32(**kwargs):
-    return JiT(depth=12, hidden_size=768, num_heads=12,
-               bottleneck_dim=128, in_context_len=32, in_context_start=4, patch_size=32, **kwargs)
+    default_kwargs = {
+        'depth': 12,
+        'hidden_size': 768,
+        'num_heads': 12,
+        'bottleneck_dim': 128,
+        'in_context_len': 32,
+        'in_context_start': 4,
+        'patch_size': 32,
+        'max_condition_frames': 2,
+        'text_latent_dim': 512,
+        'use_text_condition': False,
+    }
+    default_kwargs.update(kwargs)
+    return JiT(**default_kwargs)
 
 def JiT_L_16(**kwargs):
-    return JiT(depth=24, hidden_size=1024, num_heads=16,
-               bottleneck_dim=128, in_context_len=32, in_context_start=8, patch_size=16, **kwargs)
+    default_kwargs = {
+        'depth': 24,
+        'hidden_size': 1024,
+        'num_heads': 16,
+        'bottleneck_dim': 128,
+        'in_context_len': 32,
+        'in_context_start': 8,
+        'patch_size': 16,
+        'max_condition_frames': 2,
+        'text_latent_dim': 512,
+        'use_text_condition': False,
+    }
+    default_kwargs.update(kwargs)
+    return JiT(**default_kwargs)
 
 def JiT_L_32(**kwargs):
-    return JiT(depth=24, hidden_size=1024, num_heads=16,
-               bottleneck_dim=128, in_context_len=32, in_context_start=8, patch_size=32, **kwargs)
+    default_kwargs = {
+        'depth': 24,
+        'hidden_size': 1024,
+        'num_heads': 16,
+        'bottleneck_dim': 128,
+        'in_context_len': 32,
+        'in_context_start': 8,
+        'patch_size': 32,
+        'max_condition_frames': 2,
+        'text_latent_dim': 512,
+        'use_text_condition': False,
+    }
+    default_kwargs.update(kwargs)
+    return JiT(**default_kwargs)
 
 def JiT_H_16(**kwargs):
-    return JiT(depth=32, hidden_size=1280, num_heads=16,
-               bottleneck_dim=256, in_context_len=32, in_context_start=10, patch_size=16, **kwargs)
+    default_kwargs = {
+        'depth': 32,
+        'hidden_size': 1280,
+        'num_heads': 16,
+        'bottleneck_dim': 256,
+        'in_context_len': 32,
+        'in_context_start': 10,
+        'patch_size': 16,
+        'max_condition_frames': 2,
+        'text_latent_dim': 512,
+        'use_text_condition': False,
+    }
+    default_kwargs.update(kwargs)
+    return JiT(**default_kwargs)
 
 def JiT_H_32(**kwargs):
-    return JiT(depth=32, hidden_size=1280, num_heads=16,
-               bottleneck_dim=256, in_context_len=32, in_context_start=10, patch_size=32, **kwargs)
+    default_kwargs = {
+        'depth': 32,
+        'hidden_size': 1280,
+        'num_heads': 16,
+        'bottleneck_dim': 256,
+        'in_context_len': 32,
+        'in_context_start': 10,
+        'patch_size': 32,
+        'max_condition_frames': 2,
+        'text_latent_dim': 512,
+        'use_text_condition': False,
+    }
+    default_kwargs.update(kwargs)
+    return JiT(**default_kwargs)
 
 
 JiT_models = {
