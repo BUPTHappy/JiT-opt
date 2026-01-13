@@ -9,7 +9,12 @@ from PIL import Image
 
 import util.misc as misc
 import util.lr_sched as lr_sched
-import torch_fidelity
+try:
+    import torch_fidelity
+    HAS_TORCH_FIDELITY = True
+except ImportError:
+    HAS_TORCH_FIDELITY = False
+    print("Warning: torch_fidelity not available. FID/IS metrics will be skipped.")
 import copy
 
 
@@ -166,7 +171,7 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
     model_without_ddp.load_state_dict(model_state_dict) #从ema切换回原始模型
 
     # compute FID and IS
-    if log_writer is not None:
+    if log_writer is not None and HAS_TORCH_FIDELITY:
         if args.img_size == 256:
             fid_statistics_file = 'fid_stats/jit_in256_stats.npz'
         elif args.img_size == 512:
@@ -190,6 +195,8 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
         log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
         log_writer.add_scalar('is{}'.format(postfix), inception_score, epoch)
         print("FID: {:.4f}, Inception Score: {:.4f}".format(fid, inception_score))
+    elif log_writer is not None and not HAS_TORCH_FIDELITY:
+        print("Skipping FID/IS calculation: torch_fidelity not available")
         shutil.rmtree(save_folder)
 
     torch.distributed.barrier()
