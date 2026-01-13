@@ -8,34 +8,85 @@ import zarr
 from typing import Optional, List, Dict, Any
 
 # 注册imagecodecs codec（用于UMI数据集的JPEG-XL压缩）
-# 尝试导入UVA的codec注册，如果失败则尝试直接注册
-try:
-    # 方案1：使用UVA的codec注册（如果UVA在路径中）
-    import sys
-    uva_path = os.path.join(os.path.dirname(__file__), '../../unified_video_action')
-    if os.path.exists(uva_path):
-        sys.path.insert(0, uva_path)
-        from unified_video_action.codecs.imagecodecs_numcodecs import register_codecs
-        register_codecs()
-        print("✓ Registered codecs from UVA")
-except ImportError:
+# 必须在导入zarr之前注册
+def _register_jpegxl_codec():
+    """注册JPEG-XL codec用于UMI数据集"""
     try:
-        # 方案2：直接尝试注册imagecodecs_jpegxl（如果imagecodecs已安装）
-        from numcodecs.registry import register_codec
+        from numcodecs.registry import register_codec, get_codec
+        from numcodecs.abc import Codec
         import imagecodecs
-        if imagecodecs.JPEGXL:
-            from numcodecs.abc import Codec
-            class JpegXl(Codec):
-                codec_id = "imagecodecs_jpegxl"
-                def decode(self, buf, out=None):
-                    return imagecodecs.jpegxl_decode(buf, out=out)
-            register_codec(JpegXl)
-            print("✓ Registered imagecodecs_jpegxl codec")
-        else:
-            print("⚠ Warning: imagecodecs.JPEGXL not available, may need to install imagecodecs")
+        
+        # 检查是否已经注册
+        try:
+            get_codec({"id": "imagecodecs_jpegxl"})
+            # 已经注册，跳过
+            return True
+        except (ValueError, TypeError):
+            # 未注册，继续注册
+            pass
+        
+        if not imagecodecs.JPEGXL:
+            print("⚠ Warning: imagecodecs.JPEGXL not available")
+            return False
+        
+        # 定义JpegXl codec类
+        class JpegXl(Codec):
+            """JPEG XL codec for numcodecs."""
+            codec_id = "imagecodecs_jpegxl"
+            
+            def __init__(self, level=None, effort=None, distance=None, 
+                        lossless=None, decodingspeed=None, numthreads=None):
+                self.level = level
+                self.effort = effort
+                self.distance = distance
+                self.lossless = lossless
+                self.decodingspeed = decodingspeed
+                self.numthreads = numthreads
+            
+            def encode(self, buf):
+                return imagecodecs.jpegxl_encode(
+                    buf,
+                    level=self.level,
+                    effort=self.effort,
+                    distance=self.distance,
+                    lossless=self.lossless,
+                    decodingspeed=self.decodingspeed,
+                    numthreads=self.numthreads
+                )
+            
+            def decode(self, buf, out=None):
+                return imagecodecs.jpegxl_decode(
+                    buf,
+                    numthreads=self.numthreads,
+                    out=out
+                )
+        
+        # 注册codec
+        register_codec(JpegXl)
+        print("✓ Registered imagecodecs_jpegxl codec")
+        return True
+        
+    except ImportError as e:
+        print(f"⚠ Warning: Could not import required modules: {e}")
+        # 尝试使用UVA的codec注册
+        try:
+            import sys
+            uva_path = os.path.join(os.path.dirname(__file__), '../../unified_video_action')
+            if os.path.exists(uva_path):
+                sys.path.insert(0, uva_path)
+                from unified_video_action.codecs.imagecodecs_numcodecs import register_codecs
+                register_codecs()
+                print("✓ Registered codecs from UVA")
+                return True
+        except Exception as e2:
+            print(f"⚠ Warning: Could not register codecs from UVA: {e2}")
+            return False
     except Exception as e:
         print(f"⚠ Warning: Could not register codecs: {e}")
-        print("  You may need to install imagecodecs or add UVA to path")
+        return False
+
+# 在导入zarr之前注册codec
+_register_jpegxl_codec()
 
 
 class UmiVideoDataset(Dataset):
