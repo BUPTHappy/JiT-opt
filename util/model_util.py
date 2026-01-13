@@ -131,7 +131,41 @@ class VisionRotaryEmbeddingFast(nn.Module):
             self.freqs_cos = freqs.cos().view(-1, freqs.shape[-1]).cuda()
             self.freqs_sin = freqs.sin().view(-1, freqs.shape[-1]).cuda()
 
-    def forward(self, t): return  t * self.freqs_cos + rotate_half(t) * self.freqs_sin
+    def forward(self, t):
+        # 动态处理序列长度：t可能是(B, num_heads, N, D)或(B, N, D)
+        # 找到序列长度维度
+        if t.dim() == 4:
+            # (B, num_heads, N, D)
+            seq_len = t.shape[2]
+            seq_dim = 2
+        elif t.dim() == 3:
+            # (B, N, D)
+            seq_len = t.shape[1]
+            seq_dim = 1
+        else:
+            raise ValueError(f"Unexpected tensor dimension: {t.dim()}")
+        
+        # 根据实际序列长度切片freqs
+        if seq_len <= self.freqs_cos.shape[0]:
+            freqs_cos = self.freqs_cos[:seq_len]
+            freqs_sin = self.freqs_sin[:seq_len]
+        else:
+            # 如果序列更长，扩展freqs（复制最后一个）
+            n_extend = seq_len - self.freqs_cos.shape[0]
+            freqs_cos = torch.cat([self.freqs_cos, self.freqs_cos[-1:].repeat(n_extend, 1)], dim=0)
+            freqs_sin = torch.cat([self.freqs_sin, self.freqs_sin[-1:].repeat(n_extend, 1)], dim=0)
+        
+        # 调整freqs的形状以匹配t
+        if t.dim() == 4:
+            # (B, num_heads, N, D) -> freqs需要是(1, 1, N, D)
+            freqs_cos = freqs_cos.unsqueeze(0).unsqueeze(0)
+            freqs_sin = freqs_sin.unsqueeze(0).unsqueeze(0)
+        else:
+            # (B, N, D) -> freqs需要是(1, N, D)
+            freqs_cos = freqs_cos.unsqueeze(0)
+            freqs_sin = freqs_sin.unsqueeze(0)
+        
+        return t * freqs_cos + rotate_half(t) * freqs_sin
 
 
 class RMSNorm(nn.Module):
