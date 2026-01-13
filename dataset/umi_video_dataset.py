@@ -277,8 +277,10 @@ class UmiVideoDataset(Dataset):
                 mode='bilinear', align_corners=False
             ).squeeze(0)
         
-        return {
+        result = {
             'condition_frames': condition_frames,  # (max_condition_frames, C, H, W)
             'target_frame': target_frame,  # (C, H, W)
-            'text_latents': None  # 可选，如果需要可以添加
         }
+        # 不包含text_latents key（如果为None），避免DataLoader collate错误
+        # 如果需要text_latents，可以在训练时动态添加
+        return result
