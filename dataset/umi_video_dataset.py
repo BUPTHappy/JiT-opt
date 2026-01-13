@@ -29,21 +29,42 @@ def _register_jpegxl_codec():
             print("⚠ Warning: imagecodecs.JPEGXL not available")
             return False
         
-        # 定义JpegXl codec类
+        # 定义JpegXl codec类（匹配UVA的实现）
         class JpegXl(Codec):
             """JPEG XL codec for numcodecs."""
             codec_id = "imagecodecs_jpegxl"
             
-            def __init__(self, level=None, effort=None, distance=None, 
-                        lossless=None, decodingspeed=None, numthreads=None):
+            def __init__(
+                self,
+                # encode
+                level=None,
+                effort=None,
+                distance=None,
+                lossless=None,
+                decodingspeed=None,
+                photometric=None,
+                planar=None,
+                usecontainer=None,
+                # decode
+                index=None,
+                keeporientation=None,
+                # both
+                numthreads=None,
+            ):
                 self.level = level
                 self.effort = effort
                 self.distance = distance
-                self.lossless = lossless
+                self.lossless = bool(lossless) if lossless is not None else None
                 self.decodingspeed = decodingspeed
+                self.photometric = photometric
+                self.planar = planar
+                self.usecontainer = usecontainer
+                self.index = index
+                self.keeporientation = keeporientation
                 self.numthreads = numthreads
             
             def encode(self, buf):
+                buf = np.asarray(buf)
                 return imagecodecs.jpegxl_encode(
                     buf,
                     level=self.level,
@@ -51,14 +72,19 @@ def _register_jpegxl_codec():
                     distance=self.distance,
                     lossless=self.lossless,
                     decodingspeed=self.decodingspeed,
-                    numthreads=self.numthreads
+                    photometric=self.photometric,
+                    planar=self.planar,
+                    usecontainer=self.usecontainer,
+                    numthreads=self.numthreads,
                 )
             
             def decode(self, buf, out=None):
                 return imagecodecs.jpegxl_decode(
                     buf,
+                    index=self.index,
+                    keeporientation=self.keeporientation,
                     numthreads=self.numthreads,
-                    out=out
+                    out=out,
                 )
         
         # 注册codec
