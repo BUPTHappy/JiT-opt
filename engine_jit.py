@@ -5,7 +5,7 @@ import shutil
 
 import torch
 import numpy as np
-import cv2
+from PIL import Image
 
 import util.misc as misc
 import util.lr_sched as lr_sched
@@ -155,8 +155,9 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
             if img_id >= args.num_images:
                 break
             gen_img = np.round(np.clip(sampled_images[b_id].numpy().transpose([1, 2, 0]) * 255, 0, 255))
-            gen_img = gen_img.astype(np.uint8)[:, :, ::-1]
-            cv2.imwrite(os.path.join(save_folder, '{}.png'.format(str(img_id).zfill(5))), gen_img)
+            gen_img = gen_img.astype(np.uint8)
+            # 使用PIL保存图像（不需要OpenGL，适合无头服务器）
+            Image.fromarray(gen_img).save(os.path.join(save_folder, '{}.png'.format(str(img_id).zfill(5))))
 
     torch.distributed.barrier()
 
