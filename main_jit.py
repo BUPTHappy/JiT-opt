@@ -99,6 +99,8 @@ def get_args_parser():
                         help='Use text condition for CFG')
     parser.add_argument('--text_drop_prob', default=0.1, type=float,
                         help='Text latent dropout probability for CFG training')
+    parser.add_argument('--condition_drop_prob', default=0.1, type=float,
+                        help='Condition frames dropout probability for CFG training')
     parser.add_argument('--use_condition_frames', action='store_true',
                         help='Use condition frames instead of labels')
     parser.add_argument('--dataset_names', type=str, default='cup_arrangement_0,towel_folding_0,mouse_arrangement_0',

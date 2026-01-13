@@ -31,6 +31,7 @@ class Denoiser(nn.Module):
         
         self.label_drop_prob = args.label_drop_prob #标签drop概率
         self.text_drop_prob = getattr(args, 'text_drop_prob', 0.1)
+        self.condition_drop_prob = getattr(args, 'condition_drop_prob', 0.1)  # 条件帧drop概率（用于CFG训练）
 
         self.P_mean = args.P_mean #时间步采样的均值
         self.P_std = args.P_std #时间步采样的标准差
@@ -60,6 +61,7 @@ class Denoiser(nn.Module):
             return None, None  # 返回两个None
         drop = torch.rand(text_latents.shape[0], device=text_latents.device) < self.text_drop_prob
         return text_latents, drop
+    
 
     def sample_t(self, n: int, device=None):
         z = torch.randn(n, device=device) * self.P_std + self.P_mean
@@ -90,6 +92,16 @@ class Denoiser(nn.Module):
                     text_latents_dropped = text_latents
             else:
                 text_latents_dropped = text_latents
+        
+        # handle condition_frames (for CFG training)
+        # 注意：condition_frames的dropout需要在batch级别处理
+        # 为了简化，我们在训练时随机将整个batch的condition_frames设置为None
+        # 这样模型会学习：50%的时间有条件，50%的时间无条件
+        condition_frames_dropped = condition_frames
+        if condition_frames is not None and self.training:
+            # 随机drop整个batch的condition_frames（用于CFG训练）
+            if torch.rand(1, device=condition_frames.device).item() < self.condition_drop_prob:
+                condition_frames_dropped = None
 
         t = self.sample_t(x.size(0), device=x.device).view(-1, *([1] * (x.ndim - 1)))
         e = torch.randn_like(x) * self.noise_scale
@@ -98,7 +110,7 @@ class Denoiser(nn.Module):
         v = (x - z) / (1 - t).clamp_min(self.t_eps)
 
         x_pred = self.net(z, t.flatten(), y=labels_dropped, 
-                         condition_frames=condition_frames, 
+                         condition_frames=condition_frames_dropped, 
                          text_latents=text_latents_dropped)
         v_pred = (x_pred - z) / (1 - t).clamp_min(self.t_eps)
 
@@ -161,6 +173,11 @@ class Denoiser(nn.Module):
             # CFG with labels: unconditional = null class
             x_uncond = self.net(z, t.flatten(), torch.full_like(labels, self.num_classes),
                                condition_frames=condition_frames,
+                               text_latents=None)
+        elif condition_frames is not None:
+            # CFG with condition_frames: unconditional = condition_frames=None
+            x_uncond = self.net(z, t.flatten(), y=labels,
+                               condition_frames=None,
                                text_latents=None)
         else:
             # No CFG, just use conditional
