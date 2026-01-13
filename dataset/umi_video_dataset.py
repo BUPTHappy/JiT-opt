@@ -7,6 +7,36 @@ import torch.nn.functional as F
 import zarr
 from typing import Optional, List, Dict, Any
 
+# 注册imagecodecs codec（用于UMI数据集的JPEG-XL压缩）
+# 尝试导入UVA的codec注册，如果失败则尝试直接注册
+try:
+    # 方案1：使用UVA的codec注册（如果UVA在路径中）
+    import sys
+    uva_path = os.path.join(os.path.dirname(__file__), '../../unified_video_action')
+    if os.path.exists(uva_path):
+        sys.path.insert(0, uva_path)
+        from unified_video_action.codecs.imagecodecs_numcodecs import register_codecs
+        register_codecs()
+        print("✓ Registered codecs from UVA")
+except ImportError:
+    try:
+        # 方案2：直接尝试注册imagecodecs_jpegxl（如果imagecodecs已安装）
+        from numcodecs.registry import register_codec
+        import imagecodecs
+        if imagecodecs.JPEGXL:
+            from numcodecs.abc import Codec
+            class JpegXl(Codec):
+                codec_id = "imagecodecs_jpegxl"
+                def decode(self, buf, out=None):
+                    return imagecodecs.jpegxl_decode(buf, out=out)
+            register_codec(JpegXl)
+            print("✓ Registered imagecodecs_jpegxl codec")
+        else:
+            print("⚠ Warning: imagecodecs.JPEGXL not available, may need to install imagecodecs")
+    except Exception as e:
+        print(f"⚠ Warning: Could not register codecs: {e}")
+        print("  You may need to install imagecodecs or add UVA to path")
+
 
 class UmiVideoDataset(Dataset):
     """
