@@ -391,6 +391,9 @@ class JiT(nn.Module):
             condition_tokens = torch.cat(condition_tokens_list, dim=1)
             condition_len = condition_tokens.shape[1]
 
+        # 跟踪是否实际添加了in_context tokens
+        added_in_context_tokens = False
+        
         for i, block in enumerate(self.blocks):
             if condition_tokens is not None and i == self.in_context_start:
                 x = torch.cat([condition_tokens, x], dim=1)
@@ -399,6 +402,7 @@ class JiT(nn.Module):
                 in_context_tokens = y_emb.unsqueeze(1).repeat(1, self.in_context_len, 1)
                 in_context_tokens += self.in_context_posemb
                 x = torch.cat([in_context_tokens, x], dim=1)
+                added_in_context_tokens = True
             
             if condition_tokens is not None and i >= self.in_context_start:
                 rope = self.feat_rope_incontext
@@ -409,9 +413,10 @@ class JiT(nn.Module):
             
             x = block(x, c, rope)
 
+        # 只移除实际添加的tokens
         if condition_tokens is not None:
             x = x[:, condition_len:]
-        elif self.in_context_len > 0:
+        elif added_in_context_tokens:
             x = x[:, self.in_context_len:]
 
         x = self.final_layer(x, c)
