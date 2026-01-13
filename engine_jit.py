@@ -68,6 +68,15 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
+        
+        # 诊断信息：每1000步打印一次详细的loss统计
+        if data_iter_step % 1000 == 0 and data_iter_step > 0:
+            # 计算loss的统计信息
+            with torch.no_grad():
+                # 重新计算loss的统计（这里简化，实际可以从metric_logger获取）
+                print(f"[Diagnostic] Step {data_iter_step}: loss={loss_value:.8f}, "
+                      f"global_avg={metric_logger.meters['loss'].global_avg:.8f}, "
+                      f"median={metric_logger.meters['loss'].median:.8f}")
 
         optimizer.zero_grad()
         loss.backward()
@@ -99,14 +108,26 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
     num_steps = args.num_images // (batch_size * world_size) + 1
 
     # Construct the folder name for saving generated images.
-    #save_folder = "./experiments/run_001/heun-steps50-cfg1.5-interval0.2-0.8-image50000-res256"
-    save_folder = os.path.join(
-        args.output_dir,
-        "{}-steps{}-cfg{}-interval{}-{}-image{}-res{}".format(
-            model_without_ddp.method, model_without_ddp.steps, model_without_ddp.cfg_scale,
-            model_without_ddp.cfg_interval[0], model_without_ddp.cfg_interval[1], args.num_images, args.img_size
+    use_condition_frames = getattr(args, 'use_condition_frames', False)
+    if use_condition_frames:
+        # Video frame generation mode
+        save_folder = os.path.join(
+            args.output_dir,
+            "video-gen-{}-steps{}-cfg{}-interval{}-{}-image{}-res{}-cond{}".format(
+                model_without_ddp.method, model_without_ddp.steps, model_without_ddp.cfg_scale,
+                model_without_ddp.cfg_interval[0], model_without_ddp.cfg_interval[1], 
+                args.num_images, args.img_size, getattr(args, 'max_condition_frames', 2)
+            )
         )
-    )
+    else:
+        # ImageNet label generation mode (compatibility)
+        save_folder = os.path.join(
+            args.output_dir,
+            "imagenet-{}-steps{}-cfg{}-interval{}-{}-image{}-res{}".format(
+                model_without_ddp.method, model_without_ddp.steps, model_without_ddp.cfg_scale,
+                model_without_ddp.cfg_interval[0], model_without_ddp.cfg_interval[1], args.num_images, args.img_size
+            )
+        )
     print("Save to:", save_folder)
     if misc.get_rank() == 0 and not os.path.exists(save_folder):
         os.makedirs(save_folder)
