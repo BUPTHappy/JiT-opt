@@ -63,14 +63,21 @@ def get_args_parser():
 
 
 def load_checkpoint(checkpoint_path, model, device, use_ema=True):
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     if use_ema and 'model_ema1' in checkpoint:
         ema_state_dict1 = checkpoint['model_ema1']
+        # Remove 'net.' prefix from keys if present
+        if any(k.startswith('net.') for k in ema_state_dict1.keys()):
+            ema_state_dict1 = {k[4:] if k.startswith('net.') else k: v for k, v in ema_state_dict1.items()}
         model.net.load_state_dict(ema_state_dict1)
         print("Loaded EMA model (ema1)")
     else:
-        model.net.load_state_dict(checkpoint['model'])
+        model_state_dict = checkpoint['model']
+        # Remove 'net.' prefix from keys if present
+        if any(k.startswith('net.') for k in model_state_dict.keys()):
+            model_state_dict = {k[4:] if k.startswith('net.') else k: v for k, v in model_state_dict.items()}
+        model.net.load_state_dict(model_state_dict)
         print("Loaded regular model")
     
     print(f"Loaded checkpoint from {checkpoint_path}")
