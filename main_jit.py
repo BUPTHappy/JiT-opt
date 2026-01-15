@@ -194,6 +194,29 @@ def main(args):
         pin_memory=args.pin_mem,
         drop_last=True
     )
+    
+    # Create validation dataloader for evaluation (only for video frame generation)
+    data_loader_val = None
+    if args.use_condition_frames and args.online_eval:
+        dataset_val = UmiVideoDataset(
+            dataset_root_dir=args.data_path,
+            max_condition_frames=args.max_condition_frames,
+            image_size=args.img_size,
+            split='val',
+            dataset_names=dataset_names,
+            used_episode_indices_file=args.used_episode_indices_file if args.used_episode_indices_file else None
+        )
+        print(f"Validation dataset: {len(dataset_val)} samples")
+        sampler_val = torch.utils.data.DistributedSampler(
+            dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False
+        )
+        data_loader_val = torch.utils.data.DataLoader(
+            dataset_val, sampler=sampler_val,
+            batch_size=args.gen_bsz,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+            drop_last=False
+        )
 
     torch._dynamo.config.cache_size_limit = 128
     torch._dynamo.config.optimize_ddp = False
@@ -291,7 +314,7 @@ def main(args):
         if args.online_eval and (epoch % args.eval_freq == 0 or epoch + 1 == args.epochs):
             torch.cuda.empty_cache()
             with torch.no_grad():
-                evaluate(model_without_ddp, args, epoch, batch_size=args.gen_bsz, log_writer=log_writer)
+                evaluate(model_without_ddp, args, epoch, batch_size=args.gen_bsz, log_writer=log_writer, data_loader_val=data_loader_val)
             torch.cuda.empty_cache()
 
         if misc.is_main_process() and log_writer is not None:

@@ -100,11 +100,12 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
                 log_writer.add_scalar('lr', lr, epoch_1000x)
 
 
-def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
+def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, data_loader_val=None):
 
     model_without_ddp.eval()
     world_size = misc.get_world_size()
     local_rank = misc.get_rank()
+    device = torch.device(f'cuda:{local_rank}')
     num_steps = args.num_images // (batch_size * world_size) + 1
 
     # Construct the folder name for saving generated images.
@@ -146,10 +147,103 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
     use_condition_frames = getattr(args, 'use_condition_frames', False)
     
     if use_condition_frames:
-        # 视频帧生成模式：需要从验证集获取条件帧
-        # 这里简化处理，实际应该从验证集dataloader获取
-        print("Warning: Condition frame generation mode - need validation dataloader")
-        # 暂时跳过生成，或者你可以添加从验证集采样的逻辑
+        # 视频帧生成模式：从验证集获取条件帧和目标帧
+        if data_loader_val is None:
+            print("Warning: Validation dataloader not provided, skipping evaluation")
+            return
+        
+        print("Generating video frames from validation set...")
+        generated_folder = os.path.join(save_folder, "generated")
+        target_folder = os.path.join(save_folder, "target")
+        if misc.get_rank() == 0:
+            os.makedirs(generated_folder, exist_ok=True)
+            os.makedirs(target_folder, exist_ok=True)
+        
+        sample_count = 0
+        for batch_idx, batch in enumerate(data_loader_val):
+            if sample_count >= args.num_images:
+                break
+            
+            condition_frames = batch['condition_frames'].to(device, non_blocking=True)
+            target_frame = batch['target_frame'].to(device, non_blocking=True)
+            
+            # Ensure condition_frames are in [-1, 1] range
+            condition_frames = condition_frames.to(torch.float32)
+            target_frame = target_frame.to(torch.float32)
+            
+            actual_batch_size = min(condition_frames.shape[0], args.num_images - sample_count)
+            condition_frames = condition_frames[:actual_batch_size]
+            target_frame = target_frame[:actual_batch_size]
+            
+            if batch_idx % 10 == 0:
+                print(f"  Generating batch {batch_idx + 1}, samples {sample_count + 1}-{sample_count + actual_batch_size}")
+            
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                generated_frames = model_without_ddp.generate(condition_frames=condition_frames)
+            
+            # Clamp and normalize generated frames
+            generated_frames = torch.clamp(generated_frames, -1.0, 1.0)
+            generated_frames = (generated_frames + 1) / 2
+            generated_frames = torch.clamp(generated_frames, 0, 1).detach().cpu()
+            
+            # Normalize target frames
+            target_frame_cpu = (target_frame + 1) / 2
+            target_frame_cpu = torch.clamp(target_frame_cpu, 0, 1).detach().cpu()
+            
+            # Save images
+            for b_id in range(actual_batch_size):
+                img_id = sample_count + b_id
+                if img_id >= args.num_images:
+                    break
+                
+                # Save generated frame
+                gen_img = generated_frames[b_id].numpy().transpose(1, 2, 0)
+                gen_img = (gen_img * 255).astype(np.uint8)
+                Image.fromarray(gen_img).save(
+                    os.path.join(generated_folder, f'{img_id:05d}.png')
+                )
+                
+                # Save target frame
+                target_img = target_frame_cpu[b_id].numpy().transpose(1, 2, 0)
+                target_img = (target_img * 255).astype(np.uint8)
+                Image.fromarray(target_img).save(
+                    os.path.join(target_folder, f'{img_id:05d}.png')
+                )
+            
+            sample_count += actual_batch_size
+        
+        print(f"Generated {sample_count} pairs of images")
+        torch.distributed.barrier()
+        
+        # Compute FID between generated and target images
+        if log_writer is not None and HAS_TORCH_FIDELITY and misc.get_rank() == 0:
+            print("Computing FID between generated and target images...")
+            try:
+                metrics_dict = torch_fidelity.calculate_metrics(
+                    input1=generated_folder,
+                    input2=target_folder,
+                    cuda=True,
+                    fid=True,
+                    isc=False,
+                    kid=False,
+                    prc=False,
+                    verbose=True,
+                )
+                fid = metrics_dict['frechet_inception_distance']
+                postfix = "_video_cfg{}_res{}_cond{}".format(
+                    model_without_ddp.cfg_scale, args.img_size, getattr(args, 'max_condition_frames', 2)
+                )
+                log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
+                print(f"FID (generated vs target): {fid:.4f}")
+            except Exception as e:
+                print(f"Error computing FID: {e}")
+        
+        # Clean up temporary folders after FID calculation
+        if misc.get_rank() == 0 and log_writer is not None:
+            if not (HAS_TORCH_FIDELITY and log_writer is not None):
+                # Only clean up if we're not using the images for FID
+                shutil.rmtree(save_folder)
+        
         return
     else:
         # ImageNet label生成模式（兼容性）
