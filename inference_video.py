@@ -70,14 +70,22 @@ def load_checkpoint(checkpoint_path, model, device, use_ema=True):
         # Remove 'net.' prefix from keys if present
         if any(k.startswith('net.') for k in ema_state_dict1.keys()):
             ema_state_dict1 = {k[4:] if k.startswith('net.') else k: v for k, v in ema_state_dict1.items()}
-        model.net.load_state_dict(ema_state_dict1)
+        missing_keys, unexpected_keys = model.net.load_state_dict(ema_state_dict1, strict=False)
+        if missing_keys:
+            print(f"Warning: Missing keys when loading EMA: {missing_keys[:5]}...")
+        if unexpected_keys:
+            print(f"Warning: Unexpected keys when loading EMA: {unexpected_keys[:5]}...")
         print("Loaded EMA model (ema1)")
     else:
         model_state_dict = checkpoint['model']
         # Remove 'net.' prefix from keys if present
         if any(k.startswith('net.') for k in model_state_dict.keys()):
             model_state_dict = {k[4:] if k.startswith('net.') else k: v for k, v in model_state_dict.items()}
-        model.net.load_state_dict(model_state_dict)
+        missing_keys, unexpected_keys = model.net.load_state_dict(model_state_dict, strict=False)
+        if missing_keys:
+            print(f"Warning: Missing keys when loading model: {missing_keys[:5]}...")
+        if unexpected_keys:
+            print(f"Warning: Unexpected keys when loading model: {unexpected_keys[:5]}...")
         print("Loaded regular model")
     
     print(f"Loaded checkpoint from {checkpoint_path}")
@@ -100,6 +108,12 @@ def generate_video_frames(model, dataloader, args):
             condition_frames = batch['condition_frames'].to(args.device)
             target_frame = batch['target_frame'].to(args.device)
             
+            # Ensure condition_frames are in [-1, 1] range (dataset already normalizes, but double-check)
+            # condition_frames should be (N, max_condition_frames, C, H, W)
+            if condition_frames.max() > 1.1 or condition_frames.min() < -1.1:
+                print(f"Warning: condition_frames not in [-1,1] range: min={condition_frames.min():.3f}, max={condition_frames.max():.3f}")
+                condition_frames = torch.clamp(condition_frames, -1.0, 1.0)
+            
             batch_size = condition_frames.shape[0]
             actual_batch_size = min(batch_size, args.num_samples - sample_count)
             
@@ -107,9 +121,12 @@ def generate_video_frames(model, dataloader, args):
             target_frame = target_frame[:actual_batch_size]
             
             print(f"Generating batch {batch_idx + 1}, samples {sample_count + 1}-{sample_count + actual_batch_size}")
+            print(f"  condition_frames shape: {condition_frames.shape}, range: [{condition_frames.min():.3f}, {condition_frames.max():.3f}]")
             
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 generated_frames = model.generate(condition_frames=condition_frames)
+            
+            print(f"  generated_frames shape: {generated_frames.shape}, range: [{generated_frames.min():.3f}, {generated_frames.max():.3f}]")
             
             generated_frames = (generated_frames + 1) / 2
             generated_frames = torch.clamp(generated_frames, 0, 1)

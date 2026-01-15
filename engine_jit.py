@@ -42,9 +42,9 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
             condition_frames = batch['condition_frames'].to(device, non_blocking=True)
             target_frame = batch['target_frame'].to(device, non_blocking=True)
             
-            # normalize to [-1, 1]
-            condition_frames = condition_frames.to(torch.float32) / 127.5 - 1.0
-            target_frame = target_frame.to(torch.float32) / 127.5 - 1.0
+            # Dataset already normalizes to [-1, 1], just ensure float32
+            condition_frames = condition_frames.to(torch.float32)
+            target_frame = target_frame.to(torch.float32)
             
             text_latents = None
             if 'text_latents' in batch and batch['text_latents'] is not None:
