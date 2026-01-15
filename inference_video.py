@@ -128,9 +128,14 @@ def generate_video_frames(model, dataloader, args):
             
             print(f"  generated_frames shape: {generated_frames.shape}, range: [{generated_frames.min():.3f}, {generated_frames.max():.3f}]")
             
+            # Clamp to [-1, 1] first (model output should be in this range)
+            generated_frames = torch.clamp(generated_frames, -1.0, 1.0)
+            # Then normalize to [0, 1] for image saving
             generated_frames = (generated_frames + 1) / 2
             generated_frames = torch.clamp(generated_frames, 0, 1)
             generated_frames = generated_frames.detach().cpu()
+            
+            print(f"  After normalization: range: [{generated_frames.min():.3f}, {generated_frames.max():.3f}]")
             
             condition_frames_cpu = (condition_frames + 1) / 2
             condition_frames_cpu = torch.clamp(condition_frames_cpu, 0, 1).detach().cpu()
