@@ -175,14 +175,22 @@ def main(args):
         text_latent_dim=512,
         use_text_condition=False,
         sampling_method=args.sampling_method,
-        steps=args.num_sampling_steps,
-        cfg_scale=args.cfg,
+        num_sampling_steps=args.num_sampling_steps,
+        cfg=args.cfg,
+        interval_min=args.interval_min,
+        interval_max=args.interval_max,
         noise_scale=args.noise_scale,
         t_eps=args.t_eps,
-        cfg_interval=(args.interval_min, args.interval_max),
         condition_drop_prob=0.0,
         label_drop_prob=0.0,
-        text_drop_prob=0.0
+        text_drop_prob=0.0,
+        class_num=1000,
+        attn_dropout=0.0,
+        proj_dropout=0.0,
+        P_mean=-0.8,
+        P_std=0.8,
+        ema_decay1=0.9999,
+        ema_decay2=0.9996
     )
     
     model = Denoiser(model_args)
