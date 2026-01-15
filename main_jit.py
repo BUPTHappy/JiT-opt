@@ -274,7 +274,7 @@ def main(args):
         print("Training from scratch")
 
     # Evaluate generation
-    if args.evaluate_gen:  #是用这一个参数区分出eval和train的，因为都写在main里了
+    if args.evaluate_gen:  #是用这一个参数区分出eval和train的，因为都写在main里
         print("Evaluating checkpoint at {} epoch".format(args.start_epoch))
         with torch.random.fork_rng():
             torch.manual_seed(seed)

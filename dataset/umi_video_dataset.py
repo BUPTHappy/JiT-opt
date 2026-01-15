@@ -8,7 +8,6 @@ import zarr
 from typing import Optional, List, Dict, Any
 
 # 注册imagecodecs codec（用于UMI数据集的JPEG-XL压缩）
-# 必须在导入zarr之前注册
 def _register_jpegxl_codec():
     """注册JPEG-XL codec用于UMI数据集"""
     try:
@@ -29,7 +28,7 @@ def _register_jpegxl_codec():
             print("⚠ Warning: imagecodecs.JPEGXL not available")
             return False
         
-        # 定义JpegXl codec类（匹配UVA的实现）
+        # 定义JpegXl codec类
         class JpegXl(Codec):
             """JPEG XL codec for numcodecs."""
             codec_id = "imagecodecs_jpegxl"
@@ -89,11 +88,11 @@ def _register_jpegxl_codec():
         
         # 注册codec
         register_codec(JpegXl)
-        print("✓ Registered imagecodecs_jpegxl codec")
+        print("Registered imagecodecs_jpegxl codec")
         return True
         
     except ImportError as e:
-        print(f"⚠ Warning: Could not import required modules: {e}")
+        print(f"Warning: Could not import required modules: {e}")
         # 尝试使用UVA的codec注册
         try:
             import sys
@@ -102,13 +101,13 @@ def _register_jpegxl_codec():
                 sys.path.insert(0, uva_path)
                 from unified_video_action.codecs.imagecodecs_numcodecs import register_codecs
                 register_codecs()
-                print("✓ Registered codecs from UVA")
+                print("Registered codecs from UVA")
                 return True
         except Exception as e2:
-            print(f"⚠ Warning: Could not register codecs from UVA: {e2}")
+            print(f"Warning: Could not register codecs from UVA: {e2}")
             return False
     except Exception as e:
-        print(f"⚠ Warning: Could not register codecs: {e}")
+        print(f"Warning: Could not register codecs: {e}")
         return False
 
 # 在导入zarr之前注册codec
@@ -116,11 +115,7 @@ _register_jpegxl_codec()
 
 
 class UmiVideoDataset(Dataset):
-    """
-    UMI Multi-Task视频数据集，用于训练JiT生成下一帧
-    支持多个UMI数据集（cup_arrangement_0, towel_folding_0, mouse_arrangement_0等）
-    与UVA的UmiMultiDataset格式兼容
-    """
+
     def __init__(
         self,
         dataset_root_dir: str,
@@ -212,7 +207,7 @@ class UmiVideoDataset(Dataset):
         # 创建索引池
         self._create_index_pool()
         
-        print(f"✓ Loaded {len(self.zarr_stores)} dataset(s), total {len(self.index_pool)} samples")
+        print(f"Loaded {len(self.zarr_stores)} dataset(s), total {len(self.index_pool)} samples")
     
     def _create_index_pool(self):
         """创建所有有效的 (dataset_idx, episode_idx, frame_idx) 索引"""
@@ -251,23 +246,26 @@ class UmiVideoDataset(Dataset):
         condition_frames = []
         for i in range(self.max_condition_frames):
             cond_frame_idx = frame_idx - self.max_condition_frames + i
-            cond_frame = images[cond_frame_idx]  # (224, 224, 3) uint8
+            cond_frame = images[cond_frame_idx]  # (H, W, 3) uint8
             condition_frames.append(cond_frame)
-        condition_frames = np.stack(condition_frames)  # (max_condition_frames, 224, 224, 3)
+        condition_frames = np.stack(condition_frames)  # (max_condition_frames, H, W, 3)
         
         # 获取目标帧
-        target_frame = images[frame_idx]  # (224, 224, 3) uint8
+        target_frame = images[frame_idx]  # (H, W, 3) uint8
+        
+        # 获取原始图像尺寸（动态检测）
+        original_height, original_width = target_frame.shape[:2]
         
         # 转换为torch tensor
         condition_frames = torch.from_numpy(condition_frames).float()
         target_frame = torch.from_numpy(target_frame).float()
         
         # 转换为CHW格式并归一化到[-1, 1]
-        condition_frames = condition_frames.permute(0, 3, 1, 2) / 127.5 - 1.0  # (max_condition_frames, 3, 224, 224)
-        target_frame = target_frame.permute(2, 0, 1) / 127.5 - 1.0  # (3, 224, 224)
+        condition_frames = condition_frames.permute(0, 3, 1, 2) / 127.5 - 1.0  # (max_condition_frames, 3, H, W)
+        target_frame = target_frame.permute(2, 0, 1) / 127.5 - 1.0  # (3, H, W)
         
-        # Resize如果需要
-        if self.image_size != 224:
+        # Resize如果需要（动态检测原始尺寸）
+        if original_height != self.image_size or original_width != self.image_size:
             condition_frames = F.interpolate(
                 condition_frames, size=(self.image_size, self.image_size),
                 mode='bilinear', align_corners=False
@@ -281,6 +279,5 @@ class UmiVideoDataset(Dataset):
             'condition_frames': condition_frames,  # (max_condition_frames, C, H, W)
             'target_frame': target_frame,  # (C, H, W)
         }
-        # 不包含text_latents key（如果为None），避免DataLoader collate错误
-        # 如果需要text_latents，可以在训练时动态添加
+
         return result

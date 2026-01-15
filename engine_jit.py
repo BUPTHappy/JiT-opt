@@ -34,9 +34,7 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
         # per iteration (instead of per epoch) lr scheduler
         lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
-        # 处理数据：支持两种模式
-        # 模式1: 视频帧数据 (condition_frames, target_frame, text_latents)
-        # 模式2: ImageNet数据 (x, labels) - 兼容性
+        # 处理数据：支持两种模式兼容
         if isinstance(batch, dict):
             # 视频帧模式
             condition_frames = batch['condition_frames'].to(device, non_blocking=True)

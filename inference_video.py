@@ -8,6 +8,14 @@ from dataset.umi_video_dataset import UmiVideoDataset
 from denoiser import Denoiser
 from model_jit import JiT_models
 import copy
+import shutil
+
+try:
+    import torch_fidelity
+    HAS_TORCH_FIDELITY = True
+except ImportError:
+    HAS_TORCH_FIDELITY = False
+    print("Warning: torch_fidelity not available. FID metrics will be skipped.")
 
 
 def get_args_parser():
@@ -31,8 +39,8 @@ def get_args_parser():
                         choices=['train', 'val'],
                         help='Dataset split to use')
     
-    parser.add_argument('--num_samples', type=int, default=10,
-                        help='Number of samples to generate')
+    parser.add_argument('--num_samples', type=int, default=1000,
+                        help='Number of samples to generate for evaluation')
     parser.add_argument('--batch_size', type=int, default=4,
                         help='Batch size for generation')
     parser.add_argument('--output_dir', type=str, default='./inference_output',
@@ -58,6 +66,10 @@ def get_args_parser():
                         help='Device to use')
     parser.add_argument('--use_ema', action='store_true',
                         help='Use EMA model for inference')
+    parser.add_argument('--compute_metrics', action='store_true',
+                        help='Compute FID and other metrics between generated and target images')
+    parser.add_argument('--save_images', action='store_true', default=True,
+                        help='Save individual sample images (set to False to save disk space)')
     
     return parser
 
@@ -97,6 +109,13 @@ def load_checkpoint(checkpoint_path, model, device, use_ema=True):
 def generate_video_frames(model, dataloader, args):
     model.eval()
     os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Create folders for generated and target images (for FID calculation)
+    generated_folder = os.path.join(args.output_dir, "generated")
+    target_folder = os.path.join(args.output_dir, "target")
+    if args.compute_metrics:
+        os.makedirs(generated_folder, exist_ok=True)
+        os.makedirs(target_folder, exist_ok=True)
     
     sample_count = 0
     
@@ -144,31 +163,99 @@ def generate_video_frames(model, dataloader, args):
             
             for i in range(actual_batch_size):
                 sample_id = sample_count + i
-                sample_dir = os.path.join(args.output_dir, f'sample_{sample_id:05d}')
-                os.makedirs(sample_dir, exist_ok=True)
                 
-                for j in range(args.max_condition_frames):
-                    cond_img = condition_frames_cpu[i, j].numpy().transpose(1, 2, 0)
-                    cond_img = (cond_img * 255).astype(np.uint8)
-                    Image.fromarray(cond_img).save(
-                        os.path.join(sample_dir, f'condition_frame_{j:02d}.png')
+                # Save for FID calculation
+                if args.compute_metrics:
+                    gen_img = generated_frames[i].numpy().transpose(1, 2, 0)
+                    gen_img = (gen_img * 255).astype(np.uint8)
+                    Image.fromarray(gen_img).save(
+                        os.path.join(generated_folder, f'{sample_id:05d}.png')
+                    )
+                    
+                    target_img = target_frame_cpu[i].numpy().transpose(1, 2, 0)
+                    target_img = (target_img * 255).astype(np.uint8)
+                    Image.fromarray(target_img).save(
+                        os.path.join(target_folder, f'{sample_id:05d}.png')
                     )
                 
-                gen_img = generated_frames[i].numpy().transpose(1, 2, 0)
-                gen_img = (gen_img * 255).astype(np.uint8)
-                Image.fromarray(gen_img).save(
-                    os.path.join(sample_dir, 'generated_frame.png')
-                )
-                
-                target_img = target_frame_cpu[i].numpy().transpose(1, 2, 0)
-                target_img = (target_img * 255).astype(np.uint8)
-                Image.fromarray(target_img).save(
-                    os.path.join(sample_dir, 'target_frame.png')
-                )
+                # Save individual samples (if enabled)
+                if args.save_images and sample_id < 20:  # Only save first 20 for visualization
+                    sample_dir = os.path.join(args.output_dir, f'sample_{sample_id:05d}')
+                    os.makedirs(sample_dir, exist_ok=True)
+                    
+                    for j in range(args.max_condition_frames):
+                        cond_img = condition_frames_cpu[i, j].numpy().transpose(1, 2, 0)
+                        cond_img = (cond_img * 255).astype(np.uint8)
+                        Image.fromarray(cond_img).save(
+                            os.path.join(sample_dir, f'condition_frame_{j:02d}.png')
+                        )
+                    
+                    gen_img = generated_frames[i].numpy().transpose(1, 2, 0)
+                    gen_img = (gen_img * 255).astype(np.uint8)
+                    Image.fromarray(gen_img).save(
+                        os.path.join(sample_dir, 'generated_frame.png')
+                    )
+                    
+                    target_img = target_frame_cpu[i].numpy().transpose(1, 2, 0)
+                    target_img = (target_img * 255).astype(np.uint8)
+                    Image.fromarray(target_img).save(
+                        os.path.join(sample_dir, 'target_frame.png')
+                    )
             
             sample_count += actual_batch_size
     
     print(f"Generated {sample_count} samples in {args.output_dir}")
+    
+    # Compute metrics if requested
+    if args.compute_metrics and HAS_TORCH_FIDELITY:
+        print("\n" + "="*60)
+        print("Computing evaluation metrics...")
+        print("="*60)
+        try:
+            metrics_dict = torch_fidelity.calculate_metrics(
+                input1=generated_folder,
+                input2=target_folder,
+                cuda=torch.cuda.is_available(),
+                fid=True,
+                isc=True,
+                kid=False,
+                prc=False,
+                verbose=True,
+            )
+            
+            fid = metrics_dict.get('frechet_inception_distance', None)
+            is_score = metrics_dict.get('inception_score_mean', None)
+            
+            print("\n" + "="*60)
+            print("Evaluation Results:")
+            print("="*60)
+            if fid is not None:
+                print(f"FID (Frechet Inception Distance): {fid:.4f}")
+                print(f"  Lower is better (0 = identical distributions)")
+            if is_score is not None:
+                print(f"IS (Inception Score): {is_score:.4f}")
+                print(f"  Higher is better")
+            print("="*60)
+            
+            # Save metrics to file
+            metrics_file = os.path.join(args.output_dir, "metrics.txt")
+            with open(metrics_file, 'w') as f:
+                f.write("Evaluation Metrics\n")
+                f.write("="*60 + "\n")
+                if fid is not None:
+                    f.write(f"FID: {fid:.4f}\n")
+                if is_score is not None:
+                    f.write(f"IS: {is_score:.4f}\n")
+                f.write(f"Number of samples: {sample_count}\n")
+            print(f"\nMetrics saved to: {metrics_file}")
+            
+        except Exception as e:
+            print(f"Error computing metrics: {e}")
+            import traceback
+            traceback.print_exc()
+    elif args.compute_metrics and not HAS_TORCH_FIDELITY:
+        print("Warning: torch_fidelity not available. Install it to compute FID metrics.")
+        print("  pip install git+https://github.com/LTH14/torch-fidelity.git")
 
 
 def main(args):

@@ -95,7 +95,7 @@ class Denoiser(nn.Module):
         
         # handle condition_frames (for CFG training)
         # 注意：condition_frames的dropout需要在batch级别处理
-        # 为了简化，我们在训练时随机将整个batch的condition_frames设置为None
+        # 为了简化，在训练时随机将整个batch的condition_frames设置为None
         # 这样模型会学习：50%的时间有条件，50%的时间无条件
         condition_frames_dropped = condition_frames
         if condition_frames is not None and self.training:
@@ -106,8 +106,8 @@ class Denoiser(nn.Module):
         t = self.sample_t(x.size(0), device=x.device).view(-1, *([1] * (x.ndim - 1)))
         e = torch.randn_like(x) * self.noise_scale
 
-        z = t * x + (1 - t) * e
-        v = (x - z) / (1 - t).clamp_min(self.t_eps)
+        z = t * x + (1 - t) * e #增加噪声
+        v = (x - z) / (1 - t).clamp_min(self.t_eps) #计算速度场
 
         x_pred = self.net(z, t.flatten(), y=labels_dropped, 
                          condition_frames=condition_frames_dropped, 
