@@ -29,7 +29,8 @@ def _register_jpegxl_codec():
         if os.path.exists(uva_path):
             sys.path.insert(0, uva_path)
             from unified_video_action.codecs.imagecodecs_numcodecs import register_codecs
-            register_codecs(codecs=['imagecodecs_jpegxl'], force=False, verbose=False)
+            # 尝试注册所有codecs（UVA的register_codecs会处理JPEGXL不可用的情况）
+            register_codecs(codecs=None, force=False, verbose=False)
             # 验证注册成功
             try:
                 get_codec({"id": "imagecodecs_jpegxl"})
@@ -113,10 +114,26 @@ def _register_jpegxl_codec():
         
     except ImportError as e:
         print(f"⚠ Warning: Could not import imagecodecs: {e}")
-        print(f"   The UMI dataset uses JPEG-XL compression which requires imagecodecs.")
+        print(f"   The UMI dataset uses JPEG-XL compression which requires imagecodecs with JPEG-XL support.")
         print(f"   Please install it with: pip install imagecodecs")
+        print(f"   Note: You may need to install libjxl system library first:")
+        print(f"     - Ubuntu/Debian: sudo apt-get install libjxl-dev")
+        print(f"     - Or reinstall imagecodecs: pip install --force-reinstall --no-cache-dir imagecodecs")
         return False
     except Exception as e:
+        # Check if imagecodecs is installed but JPEGXL is not available
+        try:
+            import imagecodecs
+            if not imagecodecs.JPEGXL:
+                print(f"⚠ Warning: imagecodecs is installed but JPEG-XL support is not available.")
+                print(f"   This usually means libjxl system library is missing or imagecodecs was")
+                print(f"   installed without JPEG-XL support.")
+                print(f"   Solutions:")
+                print(f"     1. Install libjxl: sudo apt-get install libjxl-dev (Ubuntu/Debian)")
+                print(f"     2. Reinstall imagecodecs: pip install --force-reinstall --no-cache-dir imagecodecs")
+                print(f"     3. Or use conda: conda install -c conda-forge imagecodecs")
+        except:
+            pass
         print(f"⚠ Warning: Could not register imagecodecs_jpegxl codec: {e}")
         return False
 
@@ -306,10 +323,25 @@ class UmiVideoDataset(Dataset):
                 from numcodecs.registry import get_codec
                 get_codec({"id": "imagecodecs_jpegxl"})
             except (ValueError, TypeError):
-                raise RuntimeError(
-                    f"imagecodecs_jpegxl codec is not registered but is required to read the UMI dataset. "
-                    f"Please install imagecodecs: pip install imagecodecs"
+                # 提供详细的错误信息和解决方案
+                error_msg = (
+                    f"imagecodecs_jpegxl codec is not registered but is required to read the UMI dataset.\n"
+                    f"\n"
+                    f"The UMI dataset uses JPEG-XL compression. You need imagecodecs with JPEG-XL support.\n"
+                    f"\n"
+                    f"Solutions:\n"
+                    f"1. Install libjxl system library first:\n"
+                    f"   Ubuntu/Debian: sudo apt-get install libjxl-dev libjxl-tools\n"
+                    f"   Then reinstall imagecodecs: pip install --force-reinstall --no-cache-dir imagecodecs\n"
+                    f"\n"
+                    f"2. Or use conda (recommended):\n"
+                    f"   conda install -c conda-forge imagecodecs\n"
+                    f"\n"
+                    f"3. Check if imagecodecs has JPEG-XL support:\n"
+                    f"   python -c 'import imagecodecs; print(imagecodecs.JPEGXL)'\n"
+                    f"   Should print True, not False or raise an error.\n"
                 )
+                raise RuntimeError(error_msg)
             
             images = zarr_store['data']['camera0_rgb']  # (N, 224, 224, 3) uint8
             
