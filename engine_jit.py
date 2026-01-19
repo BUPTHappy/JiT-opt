@@ -48,6 +48,11 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
             if 'text_latents' in batch and batch['text_latents'] is not None:
                 text_latents = batch['text_latents'].to(device, non_blocking=True)
             
+            # 获取action数据（如果存在）
+            action_gt = None
+            if 'action' in batch and batch['action'] is not None:
+                action_gt = batch['action'].to(device, non_blocking=True)
+            
             labels = None
         else:
             # ImageNet模式（兼容性）
@@ -60,7 +65,8 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
             text_latents = None
 
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-            loss = model(target_frame, labels=labels, condition_frames=condition_frames, text_latents=text_latents)
+            loss = model(target_frame, labels=labels, condition_frames=condition_frames, 
+                        text_latents=text_latents, action_gt=action_gt)
 
         loss_value = loss.item()
         if not math.isfinite(loss_value):

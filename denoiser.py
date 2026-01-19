@@ -32,6 +32,9 @@ class Denoiser(nn.Module):
         self.label_drop_prob = args.label_drop_prob #标签drop概率
         self.text_drop_prob = getattr(args, 'text_drop_prob', 0.1)
         self.condition_drop_prob = getattr(args, 'condition_drop_prob', 0.1)  # 条件帧drop概率（用于CFG训练）
+        
+        # action prediction weight (for multi-task learning)
+        self.action_loss_weight = getattr(args, 'action_loss_weight', 0.1)
 
         self.P_mean = args.P_mean #时间步采样的均值
         self.P_std = args.P_std #时间步采样的标准差
@@ -67,7 +70,7 @@ class Denoiser(nn.Module):
         z = torch.randn(n, device=device) * self.P_std + self.P_mean
         return torch.sigmoid(z)
 
-    def forward(self, x, labels=None, condition_frames=None, text_latents=None): #JIT论文中提到的选用的理论公式
+    def forward(self, x, labels=None, condition_frames=None, text_latents=None, action_gt=None): #JIT论文中提到的选用的理论公式
         # handle labels (for compatibility)
         labels_dropped = None
         if labels is not None:
@@ -109,14 +112,32 @@ class Denoiser(nn.Module):
         z = t * x + (1 - t) * e #增加噪声
         v = (x - z) / (1 - t).clamp_min(self.t_eps) #计算速度场
 
-        x_pred = self.net(z, t.flatten(), y=labels_dropped, 
-                         condition_frames=condition_frames_dropped, 
-                         text_latents=text_latents_dropped)
+        # Forward pass with optional action prediction
+        return_action = (action_gt is not None)
+        net_output = self.net(z, t.flatten(), y=labels_dropped, 
+                             condition_frames=condition_frames_dropped, 
+                             text_latents=text_latents_dropped,
+                             return_action=return_action)
+        
+        if return_action:
+            x_pred, action_pred = net_output
+        else:
+            x_pred = net_output
+        
         v_pred = (x_pred - z) / (1 - t).clamp_min(self.t_eps)
 
-        # l2 loss
-        loss = (v - v_pred) ** 2
-        loss = loss.mean(dim=(1, 2, 3)).mean()
+        # Image generation loss (L2)
+        loss_image = (v - v_pred) ** 2
+        loss_image = loss_image.mean(dim=(1, 2, 3)).mean()
+
+        # Action prediction loss (if action_gt is provided)
+        loss_action = None
+        if action_gt is not None:
+            loss_action = torch.nn.functional.mse_loss(action_pred, action_gt)
+            # Combined loss
+            loss = loss_image + self.action_loss_weight * loss_action
+        else:
+            loss = loss_image
 
         return loss
 

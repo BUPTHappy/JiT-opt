@@ -191,9 +191,18 @@ class UmiVideoDataset(Dataset):
                 used_episodes = None  # 使用所有episodes
                 print(f"  Using all {len(episode_ends)} episodes from {dataset_name}")
             
+            # 尝试加载action数据（如果存在）
+            actions = None
+            if 'data' in zarr_store and 'action' in zarr_store['data']:
+                actions = zarr_store['data']['action']  # (N, 10) float32
+                print(f"  Found action data in {dataset_name}")
+            else:
+                print(f"  Warning: No action data found in {dataset_name}, action prediction will be disabled")
+            
             self.zarr_stores.append({
                 'store': zarr_store,
                 'images': images,
+                'actions': actions,  # 添加action数据
                 'episode_ends': episode_ends,
                 'dataset_name': dataset_name,
                 'used_episodes': used_episodes
@@ -241,6 +250,7 @@ class UmiVideoDataset(Dataset):
         dataset_idx, ep_idx, frame_idx = self.index_pool[idx]
         zarr_data = self.zarr_stores[dataset_idx]
         images = zarr_data['images']
+        actions = zarr_data.get('actions', None)  # 获取action数据（如果存在）
         
         # 获取条件帧
         condition_frames = []
@@ -252,6 +262,12 @@ class UmiVideoDataset(Dataset):
         
         # 获取目标帧
         target_frame = images[frame_idx]  # (H, W, 3) uint8
+        
+        # 获取对应的action（如果存在）
+        action = None
+        if actions is not None:
+            action = actions[frame_idx]  # (10,) float32
+            action = torch.from_numpy(action).float()
         
         # 获取原始图像尺寸（动态检测）
         original_height, original_width = target_frame.shape[:2]
@@ -279,5 +295,9 @@ class UmiVideoDataset(Dataset):
             'condition_frames': condition_frames,  # (max_condition_frames, C, H, W)
             'target_frame': target_frame,  # (C, H, W)
         }
+        
+        # 如果action数据存在，添加到结果中
+        if action is not None:
+            result['action'] = action  # (10,)
 
         return result

@@ -300,6 +300,16 @@ class JiT(nn.Module):
         # linear predict
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
 
+        # action prediction head (for video-to-action task)
+        self.action_pooler = nn.AdaptiveAvgPool1d(1)  # Global average pooling over sequence dimension
+        self.action_head = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.SiLU(),
+            nn.Linear(hidden_size // 2, hidden_size // 4),
+            nn.SiLU(),
+            nn.Linear(hidden_size // 4, 10)  # UMI action dimension: 10 (pose 9 + gripper 1)
+        )
+
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -354,13 +364,14 @@ class JiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, x, t, y=None, condition_frames=None, text_latents=None):
+    def forward(self, x, t, y=None, condition_frames=None, text_latents=None, return_action=False):
         """
         x: (N, C, H, W)
         t: (N,)
         y: (N,)
         condition_frames: (N, num_condition_frames, C, H, W) - condition frames
         text_latents: (N, text_latent_dim) - text condition for CFG (optional)
+        return_action: bool - whether to return action prediction
         """
         # class and time embeddings
         t_emb = self.t_embedder(t)
@@ -419,9 +430,20 @@ class JiT(nn.Module):
         elif added_in_context_tokens:
             x = x[:, self.in_context_len:]
 
+        # Extract action features before FinalLayer (x shape: N, num_patches, hidden_size)
+        action_pred = None
+        if return_action:
+            # Global average pooling over sequence dimension
+            # x: (N, num_patches, hidden_size) -> transpose -> (N, hidden_size, num_patches)
+            action_features = self.action_pooler(x.transpose(1, 2))  # (N, hidden_size, 1)
+            action_features = action_features.squeeze(-1)  # (N, hidden_size)
+            action_pred = self.action_head(action_features)  # (N, 10)
+
         x = self.final_layer(x, c)
         output = self.unpatchify(x, self.patch_size)
 
+        if return_action:
+            return output, action_pred
         return output
 
 

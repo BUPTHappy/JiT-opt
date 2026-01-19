@@ -100,9 +100,11 @@ def get_args_parser():
     parser.add_argument('--text_drop_prob', default=0.1, type=float,
                         help='Text latent dropout probability for CFG training')
     parser.add_argument('--condition_drop_prob', default=0.1, type=float,
-                        help='Condition frames dropout probability for CFG training')
+        help='Condition frames dropout probability for CFG training')
     parser.add_argument('--use_condition_frames', action='store_true',
-                        help='Use condition frames instead of labels')
+        help='Use condition frames instead of labels')
+    parser.add_argument('--action_loss_weight', default=0.1, type=float,
+        help='Weight for action prediction loss in multi-task learning')
     parser.add_argument('--dataset_names', type=str, default='cup_arrangement_0,towel_folding_0,mouse_arrangement_0',
                         help='Comma-separated list of dataset names for multi-task training')
     parser.add_argument('--used_episode_indices_file', type=str, default='',
@@ -255,12 +257,31 @@ def main(args):
     checkpoint_path = os.path.join(args.resume, "checkpoint-last.pth") if args.resume else None
     if checkpoint_path and os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
+        # Use strict=False to allow loading checkpoints without action_head (for backward compatibility)
+        missing_keys, unexpected_keys = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
+        if missing_keys:
+            print(f"Note: Missing keys (newly added parameters): {missing_keys[:5]}...")
+        if unexpected_keys:
+            print(f"Note: Unexpected keys (ignored): {unexpected_keys[:5]}...")
 
+        # Load EMA parameters (only for existing parameters)
         ema_state_dict1 = checkpoint['model_ema1']
         ema_state_dict2 = checkpoint['model_ema2']
-        model_without_ddp.ema_params1 = [ema_state_dict1[name].cuda() for name, _ in model_without_ddp.named_parameters()]
-        model_without_ddp.ema_params2 = [ema_state_dict2[name].cuda() for name, _ in model_without_ddp.named_parameters()]
+        # Initialize EMA for all parameters (existing ones from checkpoint, new ones from current model)
+        ema_params1_list = []
+        ema_params2_list = []
+        for name, param in model_without_ddp.named_parameters():
+            if name in ema_state_dict1:
+                ema_params1_list.append(ema_state_dict1[name].cuda())
+            else:
+                # New parameter (e.g., action_head), initialize EMA with current value
+                ema_params1_list.append(param.data.clone().cuda())
+            if name in ema_state_dict2:
+                ema_params2_list.append(ema_state_dict2[name].cuda())
+            else:
+                ema_params2_list.append(param.data.clone().cuda())
+        model_without_ddp.ema_params1 = ema_params1_list
+        model_without_ddp.ema_params2 = ema_params2_list
         print("Resumed checkpoint from", args.resume)
 
         if 'optimizer' in checkpoint and 'epoch' in checkpoint:
