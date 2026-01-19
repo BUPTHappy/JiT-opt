@@ -214,9 +214,7 @@ class UmiVideoDataset(Dataset):
                     print(f"Error: {zarr_path} is not a directory")
                     continue
                 
-                # Check if it looks like a zarr store
-                # Zarr v2 stores have .zarray/.zgroup files, v3 stores have nested groups
-                # Check for either structure
+                # Check directory structure
                 dir_contents = os.listdir(zarr_path)
                 has_zarray_files = any(f.endswith('.zarray') or f.endswith('.zgroup') for f in dir_contents)
                 has_zarr_groups = 'data' in dir_contents or 'meta' in dir_contents
@@ -226,26 +224,55 @@ class UmiVideoDataset(Dataset):
                     print(f"  Directory contents: {dir_contents[:10]}")
                     continue
                 
+                # Check zarr structure
+                zgroup_file = os.path.join(zarr_path, '.zgroup')
+                has_root_zgroup = os.path.exists(zgroup_file)
+                data_path = os.path.join(zarr_path, 'data')
+                meta_path = os.path.join(zarr_path, 'meta')
+                
+                print(f"  Checking zarr structure at: {zarr_path}")
+                print(f"    Root .zgroup exists: {has_root_zgroup}")
+                print(f"    Data directory exists: {os.path.isdir(data_path)}")
+                print(f"    Meta directory exists: {os.path.isdir(meta_path)}")
+                
                 # Try different methods to open zarr store
                 zarr_store = None
                 try:
-                    # Method 1: Direct open (most common)
+                    # Method 1: Standard zarr.open() - works if root .zgroup exists
                     zarr_store = zarr.open(zarr_path, mode='r')
+                    print(f"  ✓ Successfully opened with zarr.open()")
                 except Exception as e1:
+                    print(f"  ✗ zarr.open() failed: {e1}")
                     try:
-                        # Method 2: Using DirectoryStore explicitly
+                        # Method 2: Use DirectoryStore and zarr.group() 
+                        # This can work even without root .zgroup if data/meta are accessible
                         store = zarr.DirectoryStore(zarr_path)
-                        zarr_store = zarr.open_group(store=store, mode='r')
+                        # zarr.group() will try to open existing group or create new one
+                        # But in read mode, we need to be careful
+                        # Try opening as a group first
+                        zarr_store = zarr.group(store=store)
+                        # Verify it can access data and meta
+                        if 'data' not in zarr_store:
+                            raise KeyError("'data' not found in zarr group")
+                        if 'meta' not in zarr_store:
+                            raise KeyError("'meta' not found in zarr group")
+                        print(f"  ✓ Successfully opened with zarr.group()")
                     except Exception as e2:
-                        try:
-                            # Method 3: Using open_group directly
-                            zarr_store = zarr.open_group(zarr_path, mode='r')
-                        except Exception as e3:
+                        print(f"  ✗ zarr.group() failed: {e2}")
+                        # If both methods fail, the zarr store might be incomplete
+                        # Check if we need to create a root .zgroup file
+                        if not has_root_zgroup and os.path.isdir(data_path) and os.path.isdir(meta_path):
                             raise RuntimeError(
-                                f"Failed to open zarr store with all methods. "
-                                f"Method 1 (zarr.open): {e1}. "
-                                f"Method 2 (DirectoryStore): {e2}. "
-                                f"Method 3 (open_group): {e3}"
+                                f"Zarr store at {zarr_path} appears to be missing a root .zgroup file. "
+                                f"The data/ and meta/ directories exist, but zarr cannot open the store "
+                                f"without a root group marker. You may need to create a .zgroup file "
+                                f"in the root directory, or the zarr store may be incomplete. "
+                                f"Original errors: zarr.open()={e1}, zarr.group()={e2}"
+                            )
+                        else:
+                            raise RuntimeError(
+                                f"Failed to open zarr store at {zarr_path}. "
+                                f"Errors: zarr.open()={e1}, zarr.group()={e2}"
                             )
                 
                 if zarr_store is None:
