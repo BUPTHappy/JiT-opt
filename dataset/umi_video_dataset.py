@@ -11,23 +11,43 @@ from typing import Optional, List, Dict, Any
 # 注册imagecodecs codec（用于UMI数据集的JPEG-XL压缩）
 def _register_jpegxl_codec():
     """注册JPEG-XL codec用于UMI数据集"""
+    from numcodecs.registry import get_codec
+    
+    # 首先检查是否已经注册
     try:
-        from numcodecs.registry import register_codec, get_codec
+        get_codec({"id": "imagecodecs_jpegxl"})
+        print("✓ imagecodecs_jpegxl codec already registered")
+        return True
+    except (ValueError, TypeError):
+        # 未注册，继续尝试注册
+        pass
+    
+    # 方法1: 尝试从UVA导入并注册（推荐方法）
+    try:
+        import sys
+        uva_path = os.path.join(os.path.dirname(__file__), '../../unified_video_action')
+        if os.path.exists(uva_path):
+            sys.path.insert(0, uva_path)
+            from unified_video_action.codecs.imagecodecs_numcodecs import register_codecs
+            register_codecs(codecs=['imagecodecs_jpegxl'], force=False, verbose=False)
+            # 验证注册成功
+            try:
+                get_codec({"id": "imagecodecs_jpegxl"})
+                print("✓ Registered imagecodecs_jpegxl codec from UVA")
+                return True
+            except (ValueError, TypeError):
+                pass
+    except Exception as e:
+        pass  # 继续尝试其他方法
+    
+    # 方法2: 尝试直接导入imagecodecs并注册
+    try:
+        from numcodecs.registry import register_codec
         from numcodecs.abc import Codec
         import imagecodecs
         
-        # 检查是否已经注册
-        try:
-            get_codec({"id": "imagecodecs_jpegxl"})
-            # 已经注册，跳过
-            return True
-        except (ValueError, TypeError):
-            # 未注册，继续注册
-            pass
-        
         if not imagecodecs.JPEGXL:
-            print("⚠ Warning: imagecodecs.JPEGXL not available")
-            return False
+            raise ImportError("imagecodecs.JPEGXL not available")
         
         # 定义JpegXl codec类
         class JpegXl(Codec):
@@ -36,7 +56,6 @@ def _register_jpegxl_codec():
             
             def __init__(
                 self,
-                # encode
                 level=None,
                 effort=None,
                 distance=None,
@@ -45,10 +64,8 @@ def _register_jpegxl_codec():
                 photometric=None,
                 planar=None,
                 usecontainer=None,
-                # decode
                 index=None,
                 keeporientation=None,
-                # both
                 numthreads=None,
             ):
                 self.level = level
@@ -89,30 +106,22 @@ def _register_jpegxl_codec():
         
         # 注册codec
         register_codec(JpegXl)
-        print("Registered imagecodecs_jpegxl codec")
+        # 验证注册成功
+        get_codec({"id": "imagecodecs_jpegxl"})
+        print("✓ Registered imagecodecs_jpegxl codec directly")
         return True
         
     except ImportError as e:
-        print(f"Warning: Could not import required modules: {e}")
-        # 尝试使用UVA的codec注册
-        try:
-            import sys
-            uva_path = os.path.join(os.path.dirname(__file__), '../../unified_video_action')
-            if os.path.exists(uva_path):
-                sys.path.insert(0, uva_path)
-                from unified_video_action.codecs.imagecodecs_numcodecs import register_codecs
-                register_codecs()
-                print("Registered codecs from UVA")
-                return True
-        except Exception as e2:
-            print(f"Warning: Could not register codecs from UVA: {e2}")
-            return False
+        print(f"⚠ Warning: Could not import imagecodecs: {e}")
+        print(f"   The UMI dataset uses JPEG-XL compression which requires imagecodecs.")
+        print(f"   Please install it with: pip install imagecodecs")
+        return False
     except Exception as e:
-        print(f"Warning: Could not register codecs: {e}")
+        print(f"⚠ Warning: Could not register imagecodecs_jpegxl codec: {e}")
         return False
 
 # 在导入zarr之前注册codec
-_register_jpegxl_codec()
+_codec_registered = _register_jpegxl_codec()
 
 
 class UmiVideoDataset(Dataset):
@@ -291,6 +300,16 @@ class UmiVideoDataset(Dataset):
             if 'data' not in zarr_store or 'camera0_rgb' not in zarr_store['data']:
                 print(f"Warning: {zarr_path} does not have data/camera0_rgb, skipping")
                 continue
+            
+            # 在访问zarr数组之前，确保codec已注册
+            try:
+                from numcodecs.registry import get_codec
+                get_codec({"id": "imagecodecs_jpegxl"})
+            except (ValueError, TypeError):
+                raise RuntimeError(
+                    f"imagecodecs_jpegxl codec is not registered but is required to read the UMI dataset. "
+                    f"Please install imagecodecs: pip install imagecodecs"
+                )
             
             images = zarr_store['data']['camera0_rgb']  # (N, 224, 224, 3) uint8
             
