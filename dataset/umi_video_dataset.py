@@ -127,7 +127,22 @@ class UmiVideoDataset(Dataset):
         dataset_configs: Optional[Dict[str, Dict[str, Any]]] = None,  # 数据集配置（mask_mirror等）
         **kwargs
     ):
+        # Validate and normalize dataset_root_dir
+        if not dataset_root_dir:
+            raise ValueError(f"dataset_root_dir cannot be empty or None. Received: {repr(dataset_root_dir)}")
+        
+        dataset_root_dir = os.path.expanduser(dataset_root_dir)
+        dataset_root_dir = os.path.normpath(dataset_root_dir)
+        dataset_root_dir = os.path.abspath(dataset_root_dir)
+        
+        if not os.path.exists(dataset_root_dir):
+            raise ValueError(f"dataset_root_dir does not exist: {dataset_root_dir}")
+        
+        if not os.path.isdir(dataset_root_dir):
+            raise ValueError(f"dataset_root_dir is not a directory: {dataset_root_dir}")
+        
         self.dataset_root_dir = dataset_root_dir
+        print(f"Dataset root directory: {self.dataset_root_dir}")
         self.max_condition_frames = max_condition_frames
         self.image_size = image_size
         self.split = split
@@ -161,14 +176,58 @@ class UmiVideoDataset(Dataset):
         
         # 加载所有数据集
         for dataset_name in self.dataset_names:
+            if not dataset_name or not dataset_name.strip():
+                print(f"Warning: Empty dataset name, skipping")
+                continue
+                
+            if not dataset_root_dir or not dataset_root_dir.strip():
+                raise ValueError(f"dataset_root_dir is empty or None. Provided value: {repr(dataset_root_dir)}")
+            
             zarr_path = os.path.join(dataset_root_dir, dataset_name + '.zarr')
+            
+            # 转换为绝对路径以便调试
+            zarr_path = os.path.abspath(zarr_path)
+            
+            if not zarr_path or not zarr_path.strip():
+                raise ValueError(f"Constructed zarr_path is empty. dataset_root_dir={repr(dataset_root_dir)}, dataset_name={repr(dataset_name)}")
             
             if not os.path.exists(zarr_path):
                 print(f"Warning: {zarr_path} does not exist, skipping dataset {dataset_name}")
+                print(f"  dataset_root_dir: {os.path.abspath(dataset_root_dir)}")
+                print(f"  dataset_name: {dataset_name}")
+                continue
+            
+            if not os.path.isdir(zarr_path):
+                print(f"Warning: {zarr_path} exists but is not a directory, skipping dataset {dataset_name}")
                 continue
             
             print(f"Loading dataset: {dataset_name} from {zarr_path}")
-            zarr_store = zarr.open(zarr_path, mode='r')
+            try:
+                # Expand user path and normalize
+                zarr_path = os.path.expanduser(zarr_path)
+                zarr_path = os.path.normpath(zarr_path)
+                
+                # Verify it's a directory
+                if not os.path.isdir(zarr_path):
+                    print(f"Error: {zarr_path} is not a directory")
+                    continue
+                
+                # Check if it looks like a zarr store (has .zarray or .zgroup file)
+                zarray_files = [f for f in os.listdir(zarr_path) if f.endswith('.zarray') or f.endswith('.zgroup')]
+                if not zarray_files:
+                    print(f"Warning: {zarr_path} does not appear to be a valid zarr store (no .zarray or .zgroup files found)")
+                    print(f"  Directory contents: {os.listdir(zarr_path)[:10]}")
+                    continue
+                
+                zarr_store = zarr.open(zarr_path, mode='r')
+                if zarr_store is None:
+                    raise ValueError(f"zarr.open() returned None for path: {zarr_path}")
+            except Exception as e:
+                print(f"Error opening zarr store at {zarr_path}: {e}")
+                print(f"  Path type: {type(zarr_path)}, Path value: {repr(zarr_path)}")
+                print(f"  Path exists: {os.path.exists(zarr_path)}")
+                print(f"  Is directory: {os.path.isdir(zarr_path) if os.path.exists(zarr_path) else False}")
+                raise
             
             # 检查数据格式
             if 'data' not in zarr_store or 'camera0_rgb' not in zarr_store['data']:
