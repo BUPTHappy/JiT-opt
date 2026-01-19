@@ -240,13 +240,17 @@ def main(args):
     print("Actual lr: {:.2e}".format(args.lr))
     print("Effective batch size: %d" % eff_batch_size)
 
-    # 启用find_unused_parameters以处理条件性使用的参数（如text_embedder）
-    model = torch.nn.parallel.DistributedDataParallel(
-        model, 
-        device_ids=[args.gpu],
-        find_unused_parameters=True  # 某些参数可能在某些batch中未使用（如text_embedder）
-    )
-    model_without_ddp = model.module #DDP 包装后，原始模型被存储在 model.module 中
+    # Wrap model in DDP only if using distributed training
+    if args.distributed:
+        # 启用find_unused_parameters以处理条件性使用的参数（如text_embedder）
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, 
+            device_ids=[args.gpu],
+            find_unused_parameters=True  # 某些参数可能在某些batch中未使用（如text_embedder）
+        )
+        model_without_ddp = model.module  # DDP 包装后，原始模型被存储在 model.module 中
+    else:
+        model_without_ddp = model  # 非分布式模式下直接使用模型
 
     # Set up optimizer with weight decay adjustment for bias and norm layers
     param_groups = misc.add_weight_decay(model_without_ddp, args.weight_decay)

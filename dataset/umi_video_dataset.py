@@ -212,11 +212,16 @@ class UmiVideoDataset(Dataset):
                     print(f"Error: {zarr_path} is not a directory")
                     continue
                 
-                # Check if it looks like a zarr store (has .zarray or .zgroup file)
-                zarray_files = [f for f in os.listdir(zarr_path) if f.endswith('.zarray') or f.endswith('.zgroup')]
-                if not zarray_files:
-                    print(f"Warning: {zarr_path} does not appear to be a valid zarr store (no .zarray or .zgroup files found)")
-                    print(f"  Directory contents: {os.listdir(zarr_path)[:10]}")
+                # Check if it looks like a zarr store
+                # Zarr v2 stores have .zarray/.zgroup files, v3 stores have nested groups
+                # Check for either structure
+                dir_contents = os.listdir(zarr_path)
+                has_zarray_files = any(f.endswith('.zarray') or f.endswith('.zgroup') for f in dir_contents)
+                has_zarr_groups = 'data' in dir_contents or 'meta' in dir_contents
+                
+                if not has_zarray_files and not has_zarr_groups:
+                    print(f"Warning: {zarr_path} does not appear to be a valid zarr store")
+                    print(f"  Directory contents: {dir_contents[:10]}")
                     continue
                 
                 zarr_store = zarr.open(zarr_path, mode='r')

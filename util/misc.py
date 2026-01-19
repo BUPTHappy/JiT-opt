@@ -224,6 +224,7 @@ def init_distributed_mode(args):
         print('Not using distributed mode')
         setup_for_distributed(is_master=True)  # hack
         args.distributed = False
+        args.gpu = 0  # Set default GPU for non-distributed mode
         return
 
     args.distributed = True
