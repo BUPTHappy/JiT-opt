@@ -5,6 +5,7 @@ import torch
 from torch.utils.data import Dataset
 import torch.nn.functional as F
 import zarr
+from zarr.storage import DirectoryStore
 from typing import Optional, List, Dict, Any
 
 # 注册imagecodecs codec（用于UMI数据集的JPEG-XL压缩）
@@ -201,11 +202,12 @@ class UmiVideoDataset(Dataset):
                 print(f"Warning: {zarr_path} exists but is not a directory, skipping dataset {dataset_name}")
                 continue
             
-            print(f"Loading dataset: {dataset_name} from {zarr_path}")
+                print(f"Loading dataset: {dataset_name} from {zarr_path}")
             try:
                 # Expand user path and normalize
                 zarr_path = os.path.expanduser(zarr_path)
                 zarr_path = os.path.normpath(zarr_path)
+                zarr_path = os.path.abspath(zarr_path)
                 
                 # Verify it's a directory
                 if not os.path.isdir(zarr_path):
@@ -224,14 +226,38 @@ class UmiVideoDataset(Dataset):
                     print(f"  Directory contents: {dir_contents[:10]}")
                     continue
                 
-                zarr_store = zarr.open(zarr_path, mode='r')
+                # Try different methods to open zarr store
+                zarr_store = None
+                try:
+                    # Method 1: Direct open (most common)
+                    zarr_store = zarr.open(zarr_path, mode='r')
+                except Exception as e1:
+                    try:
+                        # Method 2: Using DirectoryStore explicitly
+                        store = zarr.DirectoryStore(zarr_path)
+                        zarr_store = zarr.open_group(store=store, mode='r')
+                    except Exception as e2:
+                        try:
+                            # Method 3: Using open_group directly
+                            zarr_store = zarr.open_group(zarr_path, mode='r')
+                        except Exception as e3:
+                            raise RuntimeError(
+                                f"Failed to open zarr store with all methods. "
+                                f"Method 1 (zarr.open): {e1}. "
+                                f"Method 2 (DirectoryStore): {e2}. "
+                                f"Method 3 (open_group): {e3}"
+                            )
+                
                 if zarr_store is None:
                     raise ValueError(f"zarr.open() returned None for path: {zarr_path}")
+                    
             except Exception as e:
                 print(f"Error opening zarr store at {zarr_path}: {e}")
                 print(f"  Path type: {type(zarr_path)}, Path value: {repr(zarr_path)}")
                 print(f"  Path exists: {os.path.exists(zarr_path)}")
                 print(f"  Is directory: {os.path.isdir(zarr_path) if os.path.exists(zarr_path) else False}")
+                import traceback
+                traceback.print_exc()
                 raise
             
             # 检查数据格式
