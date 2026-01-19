@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 
 def test_dataset():
     # 数据路径（根据你的实际路径修改）
-    data_path = "/workspace/data/umi"  # 修改为你的实际路径
+    data_path = "/workspace/umi_data"  # 修改为你的实际路径
     
     # 数据集名称
     dataset_names = [
