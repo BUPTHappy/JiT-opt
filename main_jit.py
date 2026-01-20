@@ -271,7 +271,7 @@ def main(args):
             checkpoint_path = os.path.join(args.resume, "checkpoint-last.pth")
     
     if checkpoint_path and os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         # Use strict=False to allow loading checkpoints without action_head (for backward compatibility)
         missing_keys, unexpected_keys = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
         if missing_keys:
@@ -340,13 +340,22 @@ def main(args):
     # Set up optimizer with weight decay adjustment for bias and norm layers
     if args.freeze_backbone:
         # Only optimize trainable parameters (action_head and action_pooler)
-        # Create a temporary model-like object with only trainable parameters
-        class TrainableParams:
-            def parameters(self):
-                return [p for p in model_without_ddp.parameters() if p.requires_grad]
+        trainable_params = [p for p in model_without_ddp.parameters() if p.requires_grad]
+        trainable_names = [name for name, p in model_without_ddp.named_parameters() if p.requires_grad]
         
-        trainable_model = TrainableParams()
-        param_groups = misc.add_weight_decay(trainable_model, args.weight_decay)
+        # Manually create param groups with weight decay
+        decay = []
+        no_decay = []
+        for name, param in zip(trainable_names, trainable_params):
+            if len(param.shape) == 1 or name.endswith(".bias"):
+                no_decay.append(param)
+            else:
+                decay.append(param)
+        
+        param_groups = [
+            {'params': no_decay, 'weight_decay': 0.},
+            {'params': decay, 'weight_decay': args.weight_decay}
+        ]
         optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
         print("Optimizer created with only trainable parameters (action_head and action_pooler)")
     else:
