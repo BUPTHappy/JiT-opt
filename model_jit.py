@@ -424,20 +424,27 @@ class JiT(nn.Module):
             
             x = block(x, c, rope)
 
+        # Extract action features from condition_frames (clear video features) before removing tokens
+        # This is more reasonable than extracting from noisy target_frame
+        action_pred = None
+        if return_action and condition_tokens is not None:
+            # Extract action from condition_frames features (clear video, not noisy)
+            # condition_tokens: (N, condition_len, hidden_size) - clear video features
+            # Use the last condition frame's features for action prediction
+            # Or use all condition frames and average
+            if condition_len > 0:
+                # Option 1: Use all condition tokens and average
+                condition_features = condition_tokens  # (N, condition_len, hidden_size)
+                # Global average pooling over condition sequence dimension
+                action_features = self.action_pooler(condition_features.transpose(1, 2))  # (N, hidden_size, 1)
+                action_features = action_features.squeeze(-1)  # (N, hidden_size)
+                action_pred = self.action_head(action_features)  # (N, 10)
+        
         # 只移除实际添加的tokens
         if condition_tokens is not None:
             x = x[:, condition_len:]
         elif added_in_context_tokens:
             x = x[:, self.in_context_len:]
-
-        # Extract action features before FinalLayer (x shape: N, num_patches, hidden_size)
-        action_pred = None
-        if return_action:
-            # Global average pooling over sequence dimension
-            # x: (N, num_patches, hidden_size) -> transpose -> (N, hidden_size, num_patches)
-            action_features = self.action_pooler(x.transpose(1, 2))  # (N, hidden_size, 1)
-            action_features = action_features.squeeze(-1)  # (N, hidden_size)
-            action_pred = self.action_head(action_features)  # (N, 10)
 
         x = self.final_layer(x, c)
         output = self.unpatchify(x, self.patch_size)
