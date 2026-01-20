@@ -12,7 +12,19 @@ try:
     print(f"  Version: {imagecodecs.__version__}")
     print(f"  JPEGXL available: {imagecodecs.JPEGXL}")
     
-    if imagecodecs.JPEGXL:
+    # 检查是否是stub
+    is_stub = str(imagecodecs.JPEGXL).find('STUB') != -1 or str(type(imagecodecs.JPEGXL)).find('STUB') != -1
+    
+    if is_stub:
+        print("✗ JPEG-XL support is NOT available (STUB detected)")
+        print("\nThis means imagecodecs was installed but compiled without JPEG-XL support.")
+        print("You need to install libjxl first, then reinstall imagecodecs:")
+        print("\nSolution:")
+        print("  1. Install libjxl: conda install -c conda-forge libjxl")
+        print("  2. Reinstall imagecodecs: conda install -c conda-forge imagecodecs --force-reinstall")
+        print("\nOr in one command:")
+        print("  conda install -c conda-forge libjxl imagecodecs --force-reinstall")
+    elif imagecodecs.JPEGXL:
         print("✓ JPEG-XL support is available!")
         
         # 检查numcodecs注册
@@ -56,8 +68,8 @@ try:
         print("✗ JPEG-XL support is NOT available")
         print("\nThis means imagecodecs was installed but without JPEG-XL support.")
         print("You may need to:")
-        print("  1. Reinstall: conda install -c conda-forge imagecodecs --force-reinstall")
-        print("  2. Or check if libjxl is available in the conda environment")
+        print("  1. Install libjxl: conda install -c conda-forge libjxl")
+        print("  2. Reinstall imagecodecs: conda install -c conda-forge imagecodecs --force-reinstall")
         
 except ImportError as e:
     print(f"✗ Failed to import imagecodecs: {e}")

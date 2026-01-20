@@ -48,13 +48,22 @@ def _register_jpegxl_codec():
         import imagecodecs
         
         # 详细检查JPEGXL支持
-        print(f"Checking imagecodecs: version={getattr(imagecodecs, '__version__', 'unknown')}, JPEGXL={imagecodecs.JPEGXL}")
+        jpegxl_attr = imagecodecs.JPEGXL
+        is_stub = str(jpegxl_attr).find('STUB') != -1 or str(type(jpegxl_attr)).find('STUB') != -1
+        print(f"Checking imagecodecs: version={getattr(imagecodecs, '__version__', 'unknown')}, JPEGXL={jpegxl_attr}")
         
-        if not imagecodecs.JPEGXL:
+        if is_stub or not jpegxl_attr:
             # 提供更详细的诊断信息
-            print(f"⚠ imagecodecs.JPEGXL is False or not available")
-            print(f"   This means imagecodecs was installed but without JPEG-XL support.")
-            print(f"   Try: conda install -c conda-forge imagecodecs --force-reinstall")
+            if is_stub:
+                print(f"⚠ imagecodecs.JPEGXL is a STUB (not compiled with JPEG-XL support)")
+                print(f"   You need to install libjxl first, then reinstall imagecodecs:")
+                print(f"   1. conda install -c conda-forge libjxl")
+                print(f"   2. conda install -c conda-forge imagecodecs --force-reinstall")
+                print(f"   Or: conda install -c conda-forge libjxl imagecodecs --force-reinstall")
+            else:
+                print(f"⚠ imagecodecs.JPEGXL is False or not available")
+                print(f"   This means imagecodecs was installed but without JPEG-XL support.")
+                print(f"   Try: conda install -c conda-forge libjxl imagecodecs --force-reinstall")
             raise ImportError("imagecodecs.JPEGXL not available")
         
         # 定义JpegXl codec类
@@ -131,16 +140,25 @@ def _register_jpegxl_codec():
         # Check if imagecodecs is installed but JPEGXL is not available
         try:
             import imagecodecs
+            jpegxl_attr = imagecodecs.JPEGXL
+            is_stub = str(jpegxl_attr).find('STUB') != -1 or str(type(jpegxl_attr)).find('STUB') != -1
             print(f"Debug: imagecodecs imported, version={getattr(imagecodecs, '__version__', 'unknown')}")
-            print(f"Debug: imagecodecs.JPEGXL = {imagecodecs.JPEGXL}")
-            if not imagecodecs.JPEGXL:
-                print(f"⚠ Warning: imagecodecs is installed but JPEG-XL support is not available.")
-                print(f"   This usually means libjxl system library is missing or imagecodecs was")
-                print(f"   installed without JPEG-XL support.")
-                print(f"   Solutions:")
-                print(f"     1. Reinstall with conda: conda install -c conda-forge imagecodecs --force-reinstall")
-                print(f"     2. Check installation: python -c 'import imagecodecs; print(imagecodecs.JPEGXL)'")
-                print(f"     3. If still False, you may need libjxl in conda: conda install -c conda-forge libjxl")
+            print(f"Debug: imagecodecs.JPEGXL = {jpegxl_attr} (is_stub={is_stub})")
+            if is_stub or not jpegxl_attr:
+                if is_stub:
+                    print(f"⚠ Warning: imagecodecs is installed but JPEG-XL is a STUB (not compiled with support).")
+                    print(f"   You need to install libjxl first, then reinstall imagecodecs:")
+                    print(f"   1. conda install -c conda-forge libjxl")
+                    print(f"   2. conda install -c conda-forge imagecodecs --force-reinstall")
+                    print(f"   Or: conda install -c conda-forge libjxl imagecodecs --force-reinstall")
+                else:
+                    print(f"⚠ Warning: imagecodecs is installed but JPEG-XL support is not available.")
+                    print(f"   This usually means libjxl system library is missing or imagecodecs was")
+                    print(f"   installed without JPEG-XL support.")
+                    print(f"   Solutions:")
+                    print(f"     1. Install libjxl: conda install -c conda-forge libjxl")
+                    print(f"     2. Reinstall imagecodecs: conda install -c conda-forge imagecodecs --force-reinstall")
+                    print(f"     3. Or both: conda install -c conda-forge libjxl imagecodecs --force-reinstall")
         except Exception as import_err:
             print(f"Debug: Could not import imagecodecs for check: {import_err}")
         print(f"⚠ Warning: Could not register imagecodecs_jpegxl codec: {e}")
