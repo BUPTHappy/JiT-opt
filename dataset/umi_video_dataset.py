@@ -475,6 +475,26 @@ class UmiVideoDataset(Dataset):
                     robot_data['gripper_width'] = zarr_store['data']['robot0_gripper_width']  # (N, 1)
                 if 'robot0_demo_start_pose' in zarr_store['data']:
                     robot_data['demo_start_pose'] = zarr_store['data']['robot0_demo_start_pose']  # (episodes, 6)
+                
+                # 验证数据维度对齐
+                num_images = len(images)
+                if 'eef_pos' in robot_data:
+                    num_eef_pos = len(robot_data['eef_pos'])
+                    if num_eef_pos != num_images:
+                        print(f"  ⚠ Warning: {dataset_name} dimension mismatch!")
+                        print(f"    camera0_rgb: {num_images} frames")
+                        print(f"    robot0_eef_pos: {num_eef_pos} frames")
+                        print(f"    Using min({num_images}, {num_eef_pos}) = {min(num_images, num_eef_pos)} frames")
+                        # 截断到最小长度
+                        min_len = min(num_images, num_eef_pos)
+                        images = images[:min_len]
+                        if 'eef_rot_axis_angle' in robot_data:
+                            robot_data['eef_rot_axis_angle'] = robot_data['eef_rot_axis_angle'][:min_len]
+                        if 'gripper_width' in robot_data:
+                            robot_data['gripper_width'] = robot_data['gripper_width'][:min_len]
+                        robot_data['eef_pos'] = robot_data['eef_pos'][:min_len]
+                elif isinstance(actions, str) and actions == 'build_from_raw':
+                    print(f"  ⚠ Warning: {dataset_name} has 'build_from_raw' but missing robot0_eef_pos")
             
             self.zarr_stores.append({
                 'store': zarr_store,
