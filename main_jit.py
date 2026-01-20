@@ -262,6 +262,7 @@ def main(args):
     # Resume from checkpoint if provided
     # Support both file path and directory path
     checkpoint_path = None
+    checkpoint_optimizer = None
     if args.resume:
         if os.path.isfile(args.resume):
             # Direct file path
@@ -298,19 +299,16 @@ def main(args):
         model_without_ddp.ema_params1 = ema_params1_list
         model_without_ddp.ema_params2 = ema_params2_list
         print("Resumed checkpoint from", checkpoint_path)
-
-        if 'optimizer' in checkpoint and 'epoch' in checkpoint and not args.freeze_backbone:
-            # Only load optimizer state if not freezing backbone (optimizer structure may differ)
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            args.start_epoch = checkpoint['epoch'] + 1
-            print("Loaded optimizer & scaler state!")
-        elif 'epoch' in checkpoint:
-            args.start_epoch = checkpoint['epoch'] + 1
-            print("Loaded epoch state (optimizer recreated due to freeze_backbone)")
+        
+        # Store checkpoint info for later optimizer loading
+        checkpoint_epoch = checkpoint.get('epoch', 0)
+        checkpoint_optimizer = checkpoint.get('optimizer', None)
+        args.start_epoch = checkpoint_epoch + 1
         del checkpoint
     else:
         model_without_ddp.ema_params1 = copy.deepcopy(list(model_without_ddp.parameters()))
         model_without_ddp.ema_params2 = copy.deepcopy(list(model_without_ddp.parameters()))
+        args.start_epoch = 0
         print("Training from scratch")
     
     # Freeze backbone if requested (only train action_head and action_pooler)
@@ -362,6 +360,15 @@ def main(args):
         param_groups = misc.add_weight_decay(model_without_ddp, args.weight_decay)
         optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     print(optimizer)
+    
+    # Try to load optimizer state from checkpoint (if available and structure matches)
+    if checkpoint_path and os.path.exists(checkpoint_path) and checkpoint_optimizer is not None:
+        try:
+            optimizer.load_state_dict(checkpoint_optimizer)
+            print("Loaded optimizer state from checkpoint!")
+        except Exception as e:
+            print(f"Warning: Could not load optimizer state (structure may differ): {e}")
+            print("Continuing with fresh optimizer state (this is normal if resuming from different training stage)")
 
     # Evaluate generation
     if args.evaluate_gen:  #是用这一个参数区分出eval和train的，因为都写在main里
