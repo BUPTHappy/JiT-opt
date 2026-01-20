@@ -35,6 +35,7 @@ class Denoiser(nn.Module):
         
         # action prediction weight (for multi-task learning)
         self.action_loss_weight = getattr(args, 'action_loss_weight', 0.1)
+        self.freeze_backbone = getattr(args, 'freeze_backbone', False)
 
         self.P_mean = args.P_mean #时间步采样的均值
         self.P_std = args.P_std #时间步采样的标准差
@@ -127,17 +128,34 @@ class Denoiser(nn.Module):
         v_pred = (x_pred - z) / (1 - t).clamp_min(self.t_eps)
 
         # Image generation loss (L2)
-        loss_image = (v - v_pred) ** 2
-        loss_image = loss_image.mean(dim=(1, 2, 3)).mean()
+        # Skip if backbone is frozen (no need to compute, saves computation)
+        loss_image = None
+        if not self.freeze_backbone:
+            loss_image = (v - v_pred) ** 2
+            loss_image = loss_image.mean(dim=(1, 2, 3)).mean()
 
         # Action prediction loss (if action_gt is provided)
         loss_action = None
         if action_gt is not None:
             loss_action = torch.nn.functional.mse_loss(action_pred, action_gt)
-            # Combined loss
-            loss = loss_image + self.action_loss_weight * loss_action
+        
+        # Combined loss
+        if self.freeze_backbone:
+            # When backbone is frozen, only use action loss
+            if loss_action is not None:
+                loss = loss_action
+            else:
+                raise ValueError("freeze_backbone=True but no action_gt provided")
         else:
-            loss = loss_image
+            # Normal training: combine both losses
+            if loss_image is not None and loss_action is not None:
+                loss = loss_image + self.action_loss_weight * loss_action
+            elif loss_image is not None:
+                loss = loss_image
+            elif loss_action is not None:
+                loss = loss_action
+            else:
+                raise ValueError("No loss to compute: both image and action losses are None")
 
         return loss
 

@@ -105,6 +105,8 @@ def get_args_parser():
         help='Use condition frames instead of labels')
     parser.add_argument('--action_loss_weight', default=0.1, type=float,
         help='Weight for action prediction loss in multi-task learning')
+    parser.add_argument('--freeze_backbone', action='store_true',
+        help='Freeze all parameters except action_head and action_pooler (for fine-tuning)')
     parser.add_argument('--dataset_names', type=str, default='cup_arrangement_0,towel_folding_0,mouse_arrangement_0',
                         help='Comma-separated list of dataset names for multi-task training')
     parser.add_argument('--used_episode_indices_file', type=str, default='',
@@ -224,7 +226,12 @@ def main(args):
     torch._dynamo.config.optimize_ddp = False
 
     # Create denoiser
+    # Pass freeze_backbone flag to Denoiser (will be set later, but prepare args)
     model = Denoiser(args)
+    
+    # Set freeze_backbone in denoiser after creation (if needed)
+    if args.freeze_backbone:
+        model.freeze_backbone = True
 
     print("Model =", model)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -252,13 +259,17 @@ def main(args):
     else:
         model_without_ddp = model  # 非分布式模式下直接使用模型
 
-    # Set up optimizer with weight decay adjustment for bias and norm layers
-    param_groups = misc.add_weight_decay(model_without_ddp, args.weight_decay)
-    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
-    print(optimizer)
-
     # Resume from checkpoint if provided
-    checkpoint_path = os.path.join(args.resume, "checkpoint-last.pth") if args.resume else None
+    # Support both file path and directory path
+    checkpoint_path = None
+    if args.resume:
+        if os.path.isfile(args.resume):
+            # Direct file path
+            checkpoint_path = args.resume
+        elif os.path.isdir(args.resume):
+            # Directory path, look for checkpoint-last.pth
+            checkpoint_path = os.path.join(args.resume, "checkpoint-last.pth")
+    
     if checkpoint_path and os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         # Use strict=False to allow loading checkpoints without action_head (for backward compatibility)
@@ -286,17 +297,62 @@ def main(args):
                 ema_params2_list.append(param.data.clone().cuda())
         model_without_ddp.ema_params1 = ema_params1_list
         model_without_ddp.ema_params2 = ema_params2_list
-        print("Resumed checkpoint from", args.resume)
+        print("Resumed checkpoint from", checkpoint_path)
 
-        if 'optimizer' in checkpoint and 'epoch' in checkpoint:
+        if 'optimizer' in checkpoint and 'epoch' in checkpoint and not args.freeze_backbone:
+            # Only load optimizer state if not freezing backbone (optimizer structure may differ)
             optimizer.load_state_dict(checkpoint['optimizer'])
             args.start_epoch = checkpoint['epoch'] + 1
             print("Loaded optimizer & scaler state!")
+        elif 'epoch' in checkpoint:
+            args.start_epoch = checkpoint['epoch'] + 1
+            print("Loaded epoch state (optimizer recreated due to freeze_backbone)")
         del checkpoint
     else:
         model_without_ddp.ema_params1 = copy.deepcopy(list(model_without_ddp.parameters()))
         model_without_ddp.ema_params2 = copy.deepcopy(list(model_without_ddp.parameters()))
         print("Training from scratch")
+    
+    # Freeze backbone if requested (only train action_head and action_pooler)
+    if args.freeze_backbone:
+        print("="*60)
+        print("Freezing backbone parameters, only training action_head and action_pooler")
+        print("="*60)
+        frozen_params = 0
+        trainable_params = 0
+        for name, param in model_without_ddp.named_parameters():
+            if 'action_head' in name or 'action_pooler' in name:
+                param.requires_grad = True
+                trainable_params += param.numel()
+            else:
+                param.requires_grad = False
+                frozen_params += param.numel()
+        print(f"Frozen parameters: {frozen_params / 1e6:.2f}M")
+        print(f"Trainable parameters: {trainable_params / 1e6:.2f}M")
+        print("="*60)
+        
+        # Set freeze_backbone flag in denoiser for loss computation optimization
+        # This will be passed to Denoiser during initialization, but we also set it here
+        # for models that are already created
+        if hasattr(model_without_ddp, 'freeze_backbone'):
+            model_without_ddp.freeze_backbone = True
+    
+    # Set up optimizer with weight decay adjustment for bias and norm layers
+    if args.freeze_backbone:
+        # Only optimize trainable parameters (action_head and action_pooler)
+        # Create a temporary model-like object with only trainable parameters
+        class TrainableParams:
+            def parameters(self):
+                return [p for p in model_without_ddp.parameters() if p.requires_grad]
+        
+        trainable_model = TrainableParams()
+        param_groups = misc.add_weight_decay(trainable_model, args.weight_decay)
+        optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
+        print("Optimizer created with only trainable parameters (action_head and action_pooler)")
+    else:
+        param_groups = misc.add_weight_decay(model_without_ddp, args.weight_decay)
+        optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
+    print(optimizer)
 
     # Evaluate generation
     if args.evaluate_gen:  #是用这一个参数区分出eval和train的，因为都写在main里

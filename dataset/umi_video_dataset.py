@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import zarr
 from zarr.storage import DirectoryStore
 from typing import Optional, List, Dict, Any
+import scipy.spatial.transform as st
 
 # 注册imagecodecs codec（用于UMI数据集的JPEG-XL压缩）
 def _register_jpegxl_codec():
@@ -168,6 +169,59 @@ def _register_jpegxl_codec():
 
 # 在导入zarr之前注册codec
 _codec_registered = _register_jpegxl_codec()
+
+
+def _axis_angle_to_rot6d(axis_angle):
+    """
+    Convert axis-angle (3D) to rotation 6D representation.
+    axis_angle: (..., 3) numpy array
+    Returns: (..., 6) numpy array
+    """
+    # Convert axis-angle to rotation matrix
+    rot = st.Rotation.from_rotvec(axis_angle)
+    rot_mat = rot.as_matrix()  # (..., 3, 3)
+    
+    # Extract first two rows as 6D representation
+    batch_dim = rot_mat.shape[:-2]
+    rot6d = rot_mat[..., :2, :].reshape(batch_dim + (6,))
+    return rot6d
+
+
+def _build_action_from_robot_data(eef_pos, eef_rot_axis_angle, gripper_width, start_pose=None):
+    """
+    Build 10D action from robot data.
+    Args:
+        eef_pos: (3,) - end effector position
+        eef_rot_axis_angle: (3,) - end effector rotation (axis-angle)
+        gripper_width: (1,) - gripper width
+        start_pose: (6,) optional - episode start pose [pos(3), rot_axis_angle(3)]
+    Returns:
+        action: (10,) - [pos(3), rot_6d(6), gripper(1)]
+    """
+    # Convert axis-angle to 6D rotation
+    rot6d = _axis_angle_to_rot6d(eef_rot_axis_angle.reshape(1, 3))[0]  # (6,)
+    
+    # If start_pose provided, compute relative action
+    if start_pose is not None:
+        start_pos = start_pose[:3]
+        start_rot_axis_angle = start_pose[3:]
+        
+        # Relative position
+        rel_pos = eef_pos - start_pos
+        
+        # Relative rotation: start_rot^-1 * current_rot
+        start_rot = st.Rotation.from_rotvec(start_rot_axis_angle)
+        current_rot = st.Rotation.from_rotvec(eef_rot_axis_angle)
+        rel_rot = start_rot.inv() * current_rot
+        rel_rot_mat = rel_rot.as_matrix()
+        rel_rot6d = rel_rot_mat[:2, :].reshape(6)
+        
+        action = np.concatenate([rel_pos, rel_rot6d, gripper_width])
+    else:
+        # Absolute action
+        action = np.concatenate([eef_pos, rot6d, gripper_width])
+    
+    return action.astype(np.float32)
 
 
 class UmiVideoDataset(Dataset):
@@ -388,18 +442,45 @@ class UmiVideoDataset(Dataset):
                 used_episodes = None  # 使用所有episodes
                 print(f"  Using all {len(episode_ends)} episodes from {dataset_name}")
             
-            # 尝试加载action数据（如果存在）
+            # 尝试加载action数据（如果存在预处理的action）
             actions = None
             if 'data' in zarr_store and 'action' in zarr_store['data']:
                 actions = zarr_store['data']['action']  # (N, 10) float32
-                print(f"  Found action data in {dataset_name}")
+                print(f"  Found preprocessed action data in {dataset_name}")
             else:
-                print(f"  Warning: No action data found in {dataset_name}, action prediction will be disabled")
+                # 从原始数据构建action: robot0_eef_pos, robot0_eef_rot_axis_angle, robot0_gripper_width
+                if 'data' in zarr_store:
+                    has_eef_pos = 'robot0_eef_pos' in zarr_store['data']
+                    has_eef_rot = 'robot0_eef_rot_axis_angle' in zarr_store['data']
+                    has_gripper = 'robot0_gripper_width' in zarr_store['data']
+                    
+                    if has_eef_pos and has_eef_rot and has_gripper:
+                        print(f"  Building action from raw data: robot0_eef_pos, robot0_eef_rot_axis_angle, robot0_gripper_width")
+                        # 将在__getitem__中动态构建，这里只标记
+                        actions = 'build_from_raw'  # 标记需要构建
+                    else:
+                        print(f"  Warning: Missing robot data in {dataset_name}")
+                        print(f"    robot0_eef_pos: {has_eef_pos}, robot0_eef_rot_axis_angle: {has_eef_rot}, robot0_gripper_width: {has_gripper}")
+                else:
+                    print(f"  Warning: No action data found in {dataset_name}, action prediction will be disabled")
+            
+            # 加载原始robot数据（用于构建action）
+            robot_data = {}
+            if 'data' in zarr_store:
+                if 'robot0_eef_pos' in zarr_store['data']:
+                    robot_data['eef_pos'] = zarr_store['data']['robot0_eef_pos']  # (N, 3)
+                if 'robot0_eef_rot_axis_angle' in zarr_store['data']:
+                    robot_data['eef_rot_axis_angle'] = zarr_store['data']['robot0_eef_rot_axis_angle']  # (N, 3)
+                if 'robot0_gripper_width' in zarr_store['data']:
+                    robot_data['gripper_width'] = zarr_store['data']['robot0_gripper_width']  # (N, 1)
+                if 'robot0_demo_start_pose' in zarr_store['data']:
+                    robot_data['demo_start_pose'] = zarr_store['data']['robot0_demo_start_pose']  # (episodes, 6)
             
             self.zarr_stores.append({
                 'store': zarr_store,
                 'images': images,
-                'actions': actions,  # 添加action数据
+                'actions': actions,  # 预处理的action或'build_from_raw'
+                'robot_data': robot_data,  # 原始robot数据
                 'episode_ends': episode_ends,
                 'dataset_name': dataset_name,
                 'used_episodes': used_episodes
@@ -448,6 +529,10 @@ class UmiVideoDataset(Dataset):
         zarr_data = self.zarr_stores[dataset_idx]
         images = zarr_data['images']
         actions = zarr_data.get('actions', None)  # 获取action数据（如果存在）
+        robot_data = zarr_data.get('robot_data', {})
+        episode_ends = zarr_data['episode_ends']
+        episode_starts = [0] + list(episode_ends[:-1])
+        ep_start = episode_starts[ep_idx]
         
         # 获取条件帧
         condition_frames = []
@@ -463,8 +548,26 @@ class UmiVideoDataset(Dataset):
         # 获取对应的action（如果存在）
         action = None
         if actions is not None:
-            action = actions[frame_idx]  # (10,) float32
-            action = torch.from_numpy(action).float()
+            if isinstance(actions, str) and actions == 'build_from_raw':
+                # 从原始数据构建action
+                if 'eef_pos' in robot_data and 'eef_rot_axis_angle' in robot_data and 'gripper_width' in robot_data:
+                    eef_pos = robot_data['eef_pos'][frame_idx]  # (3,)
+                    eef_rot_axis_angle = robot_data['eef_rot_axis_angle'][frame_idx]  # (3,)
+                    gripper_width = robot_data['gripper_width'][frame_idx]  # (1,)
+                    
+                    # 获取episode start pose（如果存在）
+                    start_pose = None
+                    if 'demo_start_pose' in robot_data:
+                        start_pose = robot_data['demo_start_pose'][ep_idx]  # (6,)
+                    
+                    action = _build_action_from_robot_data(
+                        eef_pos, eef_rot_axis_angle, gripper_width, start_pose
+                    )
+                    action = torch.from_numpy(action).float()
+            else:
+                # 使用预处理的action
+                action = actions[frame_idx]  # (10,) float32
+                action = torch.from_numpy(action).float()
         
         # 获取原始图像尺寸（动态检测）
         original_height, original_width = target_frame.shape[:2]
