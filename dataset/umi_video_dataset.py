@@ -210,7 +210,11 @@ class UmiVideoDataset(Dataset):
         print(f"Loaded {len(self.zarr_stores)} dataset(s), total {len(self.index_pool)} samples")
     
     def _create_index_pool(self):
-        """创建所有有效的 (dataset_idx, episode_idx, frame_idx) 索引"""
+        """创建所有有效的 (dataset_idx, episode_idx, frame_idx) 索引
+        
+        按 episode 级别划分 train/val（95%/5%），确保同一个 episode 的帧
+        不会同时出现在训练集和验证集中。
+        """
         self.index_pool = []
         
         for dataset_idx, zarr_data in enumerate(self.zarr_stores):
@@ -225,6 +229,22 @@ class UmiVideoDataset(Dataset):
             else:
                 # 处理所有episodes
                 episode_indices = list(range(len(episode_ends)))
+            
+            # 按 episode 划分 train/val（95%/5%）
+            num_episodes = len(episode_indices)
+            num_train = max(1, int(num_episodes * 0.95))  # 至少保留1个train episode
+            
+            if self.split == 'train':
+                episode_indices = episode_indices[:num_train]
+            elif self.split == 'val':
+                episode_indices = episode_indices[num_train:]
+                if len(episode_indices) == 0:
+                    # 如果episode太少不够分，val用最后一个episode
+                    episode_indices = [episode_indices[-1]] if num_episodes > 0 else []
+            # else: 使用全部（兼容性）
+            
+            dataset_name = zarr_data['dataset_name']
+            print(f"  [{self.split}] {dataset_name}: using {len(episode_indices)}/{num_episodes} episodes")
             
             for ep_idx in episode_indices:
                 start = episode_starts[ep_idx]
