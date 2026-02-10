@@ -15,7 +15,21 @@ try:
 except ImportError:
     HAS_TORCH_FIDELITY = False
     print("Warning: torch_fidelity not available. FID/IS metrics will be skipped.")
+try:
+    import wandb
+    HAS_WANDB = wandb.run is not None  # Will be re-checked at log time
+except ImportError:
+    HAS_WANDB = False
 import copy
+
+
+def _wandb_active():
+    """Check if W&B is initialized and active."""
+    try:
+        import wandb
+        return wandb.run is not None
+    except ImportError:
+        return False
 
 
 def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, epoch, log_writer=None, args=None):
@@ -96,6 +110,16 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
             if data_iter_step % args.log_freq == 0:
                 log_writer.add_scalar('train_loss', loss_value_reduce, epoch_1000x)
                 log_writer.add_scalar('lr', lr, epoch_1000x)
+
+        # W&B logging
+        if _wandb_active() and data_iter_step % args.log_freq == 0:
+            epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
+            wandb.log({
+                'train_loss': loss_value_reduce,
+                'lr': lr,
+                'epoch': epoch,
+                'epoch_1000x': epoch_1000x,
+            }, step=epoch_1000x)
 
 
 def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, data_loader_val=None):
@@ -233,6 +257,12 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
                 )
                 log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
                 print(f"FID (generated vs target): {fid:.4f}")
+                # W&B logging for video FID
+                if _wandb_active():
+                    wandb.log({
+                        'fid{}'.format(postfix): fid,
+                        'eval_epoch': epoch,
+                    }, step=epoch * 1000)
             except Exception as e:
                 print(f"Error computing FID: {e}")
         
@@ -308,6 +338,13 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
         log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
         log_writer.add_scalar('is{}'.format(postfix), inception_score, epoch)
         print("FID: {:.4f}, Inception Score: {:.4f}".format(fid, inception_score))
+        # W&B logging for ImageNet FID/IS
+        if _wandb_active():
+            wandb.log({
+                'fid{}'.format(postfix): fid,
+                'is{}'.format(postfix): inception_score,
+                'eval_epoch': epoch,
+            }, step=epoch * 1000)
     elif log_writer is not None and not HAS_TORCH_FIDELITY:
         print("Skipping FID/IS calculation: torch_fidelity not available")
         shutil.rmtree(save_folder)

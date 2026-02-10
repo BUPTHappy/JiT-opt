@@ -127,6 +127,16 @@ def get_args_parser():
     parser.add_argument('--dist_url', default='env://',
                         help='URL used to set up distributed training')
 
+    # Weights & Biases
+    parser.add_argument('--wandb', action='store_true',
+                        help='Enable Weights & Biases online logging')
+    parser.add_argument('--wandb_project', type=str, default='JiT-video',
+                        help='W&B project name')
+    parser.add_argument('--wandb_entity', type=str, default=None,
+                        help='W&B entity (team or username)')
+    parser.add_argument('--wandb_run_name', type=str, default=None,
+                        help='W&B run name (auto-generated if not set)')
+
     return parser
 
 
@@ -153,6 +163,19 @@ def main(args):
         log_writer = SummaryWriter(log_dir=args.output_dir)
     else:
         log_writer = None
+
+    # Set up Weights & Biases logging (only on main process)
+    if global_rank == 0 and args.wandb:
+        import wandb
+        wandb_run_name = args.wandb_run_name or os.path.basename(args.output_dir)
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=wandb_run_name,
+            config=vars(args),
+            dir=args.output_dir,
+        )
+        print(f"W&B logging enabled: {wandb.run.url}")
 
     # Data loading: 支持两种模式
     if args.use_condition_frames:
@@ -323,6 +346,11 @@ def main(args):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time:', total_time_str)
+
+    # Finish W&B run
+    if global_rank == 0 and args.wandb:
+        import wandb
+        wandb.finish()
 
 
 if __name__ == '__main__':
