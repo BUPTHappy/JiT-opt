@@ -1,5 +1,5 @@
 Evaluation Metrics
 ============================================================
-FID: 45.5592
-IS: 1.4210
-Number of samples: 100
+FID: 45.9410
+IS: 1.4049
+Number of samples: 20
