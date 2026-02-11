@@ -107,6 +107,8 @@ def get_args_parser():
                         help='Comma-separated list of dataset names for multi-task training')
     parser.add_argument('--used_episode_indices_file', type=str, default='',
                         help='JSON file specifying which episodes to use (optional)')
+    parser.add_argument('--image_key', type=str, default=None,
+                        help='Image key in zarr data group (default: auto-detect, supports camera0_rgb for UMI and img for PushT)')
     
     # checkpointing
     parser.add_argument('--output_dir', default='./output_dir',
@@ -191,7 +193,8 @@ def main(args):
             image_size=args.img_size,
             split='train',
             dataset_names=dataset_names,
-            used_episode_indices_file=args.used_episode_indices_file if args.used_episode_indices_file else None
+            used_episode_indices_file=args.used_episode_indices_file if args.used_episode_indices_file else None,
+            image_key=args.image_key,
         )
         print(f"Video dataset: {len(dataset_train)} samples")
     else:
@@ -227,7 +230,8 @@ def main(args):
             image_size=args.img_size,
             split='val',
             dataset_names=dataset_names,
-            used_episode_indices_file=args.used_episode_indices_file if args.used_episode_indices_file else None
+            used_episode_indices_file=args.used_episode_indices_file if args.used_episode_indices_file else None,
+            image_key=args.image_key,
         )
         print(f"Validation dataset: {len(dataset_val)} samples")
         sampler_val = torch.utils.data.DistributedSampler(

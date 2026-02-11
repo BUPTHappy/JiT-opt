@@ -35,6 +35,8 @@ def get_args_parser():
                         help='Path to UMI dataset')
     parser.add_argument('--dataset_names', type=str, default='cup_arrangement_0,towel_folding_0,mouse_arrangement_0',
                         help='Comma-separated dataset names')
+    parser.add_argument('--image_key', type=str, default=None,
+                        help='Image key in zarr data group (default: auto-detect)')
     parser.add_argument('--split', type=str, default='train',
                         choices=['train', 'val'],
                         help='Dataset split to use')
@@ -271,7 +273,8 @@ def main(args):
         max_condition_frames=args.max_condition_frames,
         image_size=args.img_size,
         split=args.split,
-        dataset_names=dataset_names
+        dataset_names=dataset_names,
+        image_key=getattr(args, 'image_key', None),
     )
     
     dataloader = torch.utils.data.DataLoader(

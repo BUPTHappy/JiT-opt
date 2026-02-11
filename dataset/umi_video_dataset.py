@@ -115,6 +115,8 @@ _register_jpegxl_codec()
 
 
 class UmiVideoDataset(Dataset):
+    # 支持的图像 key 列表，按优先级排列
+    SUPPORTED_IMAGE_KEYS = ['camera0_rgb', 'img']
 
     def __init__(
         self,
@@ -125,12 +127,14 @@ class UmiVideoDataset(Dataset):
         dataset_names: Optional[List[str]] = None,  # 数据集名称列表，如 ['cup_arrangement_0', 'towel_folding_0', 'mouse_arrangement_0']
         used_episode_indices_file: Optional[str] = None,  # JSON文件，指定使用的episode索引
         dataset_configs: Optional[Dict[str, Dict[str, Any]]] = None,  # 数据集配置（mask_mirror等）
+        image_key: Optional[str] = None,  # 图像数据的 key，None 表示自动检测（兼容 UMI 的 camera0_rgb 和 PushT 的 img）
         **kwargs
     ):
         self.dataset_root_dir = dataset_root_dir
         self.max_condition_frames = max_condition_frames
         self.image_size = image_size
         self.split = split
+        self.image_key = image_key  # None = 自动检测
         
         # 确定要加载的数据集
         if dataset_names is None:
@@ -170,12 +174,27 @@ class UmiVideoDataset(Dataset):
             print(f"Loading dataset: {dataset_name} from {zarr_path}")
             zarr_store = zarr.open(zarr_path, mode='r')
             
-            # 检查数据格式
-            if 'data' not in zarr_store or 'camera0_rgb' not in zarr_store['data']:
-                print(f"Warning: {zarr_path} does not have data/camera0_rgb, skipping")
+            # 检查数据格式，自动检测图像 key
+            if 'data' not in zarr_store:
+                print(f"Warning: {zarr_path} does not have 'data' group, skipping")
                 continue
             
-            images = zarr_store['data']['camera0_rgb']  # (N, 224, 224, 3) uint8
+            # 确定图像 key：优先使用显式指定的 image_key，否则自动检测
+            detected_image_key = self.image_key
+            if detected_image_key is None:
+                for candidate_key in self.SUPPORTED_IMAGE_KEYS:
+                    if candidate_key in zarr_store['data']:
+                        detected_image_key = candidate_key
+                        break
+            
+            if detected_image_key is None or detected_image_key not in zarr_store['data']:
+                available_keys = list(zarr_store['data'].keys()) if hasattr(zarr_store['data'], 'keys') else []
+                print(f"Warning: {zarr_path} does not have a supported image key "
+                      f"(tried: {self.SUPPORTED_IMAGE_KEYS}, available: {available_keys}), skipping")
+                continue
+            
+            images = zarr_store['data'][detected_image_key]
+            print(f"  Using image key: '{detected_image_key}', shape: {images.shape}")
             
             if 'meta' not in zarr_store or 'episode_ends' not in zarr_store['meta']:
                 print(f"Warning: {zarr_path} does not have meta/episode_ends, skipping")
