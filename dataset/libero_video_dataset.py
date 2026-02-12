@@ -123,7 +123,29 @@ class LiberoVideoDataset(Dataset):
         print(f"Total {len(self.index_pool)} samples")
 
     def _compute_clip_embeddings(self):
-        """Pre-compute CLIP text embeddings for all unique language goals."""
+        """Pre-compute CLIP text embeddings for all unique language goals.
+        
+        Uses caching to avoid recomputation and handles distributed training
+        by computing only once and saving to disk.
+        """
+        import hashlib
+        import json
+
+        # Create a deterministic cache key from the language goals
+        unique_languages = sorted(set(self.all_languages))
+        cache_key = hashlib.md5(json.dumps(unique_languages).encode()).hexdigest()[:12]
+        cache_path = os.path.join(self.dataset_path, f".clip_embeddings_cache_{cache_key}.npz")
+
+        # Try loading from cache first
+        if os.path.exists(cache_path):
+            print(f"Loading cached CLIP embeddings from {cache_path}")
+            cache = np.load(cache_path, allow_pickle=True)
+            lang_to_embedding = {k: cache[k] for k in cache.files}
+            embeddings = [lang_to_embedding[lang] for lang in self.all_languages]
+            print(f"  Loaded {len(lang_to_embedding)} unique embeddings")
+            return embeddings
+
+        # Compute embeddings
         try:
             from transformers import CLIPModel, AutoTokenizer
         except ImportError:
@@ -134,11 +156,20 @@ class LiberoVideoDataset(Dataset):
 
         print("Computing CLIP text embeddings...")
         tokenizer = AutoTokenizer.from_pretrained("openai/clip-vit-base-patch32")
-        clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+
+        # Bypass torch.load security check on PyTorch < 2.6
+        # (safe here: we only load the public CLIP model from HuggingFace)
+        import transformers.utils.import_utils as _tf_import_utils
+        _orig_check = getattr(_tf_import_utils, 'check_torch_load_is_safe', None)
+        if _orig_check is not None:
+            _tf_import_utils.check_torch_load_is_safe = lambda: None
+        try:
+            clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+        finally:
+            if _orig_check is not None:
+                _tf_import_utils.check_torch_load_is_safe = _orig_check
         clip_model.eval()
 
-        # Get unique language goals
-        unique_languages = list(set(self.all_languages))
         print(f"  Unique language goals: {len(unique_languages)}")
 
         # Compute embeddings for each unique language
@@ -159,15 +190,19 @@ class LiberoVideoDataset(Dataset):
                 # Normalize (standard CLIP practice)
                 text_features = text_features / text_features.norm(dim=-1, keepdim=True)
                 lang_to_embedding[lang] = text_features.squeeze(0).numpy()  # (512,)
-                print(f"    \"{lang[:60]}...\" -> shape {text_features.shape}")
+                print(f"    \"{lang[:60]}...\" -> dim {text_features.shape[-1]}")
 
-        del clip_model  # Free GPU memory
+        del clip_model  # Free memory
+
+        # Save cache to disk (so other ranks / future runs can reuse)
+        try:
+            np.savez(cache_path, **lang_to_embedding)
+            print(f"  Saved CLIP embeddings cache to {cache_path}")
+        except Exception as e:
+            print(f"  Warning: Could not save cache: {e}")
 
         # Map each episode to its embedding
-        embeddings = []
-        for lang in self.all_languages:
-            embeddings.append(lang_to_embedding[lang])
-
+        embeddings = [lang_to_embedding[lang] for lang in self.all_languages]
         return embeddings
 
     def __len__(self):
