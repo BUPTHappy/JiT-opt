@@ -337,23 +337,15 @@ class LiberoVideoDataset(Dataset):
         n_unique = len(unique_keys)
         print(f"  Unique language conditions: {n_unique}")
 
-        # ------- cache file -------
-        sorted_keys = sorted(unique_keys.keys())
-        cache_hash = hashlib.md5(b"".join(sorted_keys)).hexdigest()[:12]
+        # ------- cache: simple (n_episodes, dim) matrix -------
         cache_dir = self.dataset_path if os.path.isdir(self.dataset_path) else os.path.dirname(self.dataset_path)
-        cache_path = os.path.join(cache_dir, f".clip_embeddings_cache_{cache_hash}.npz")
+        cache_path = os.path.join(cache_dir, f".clip_embeddings_v2_{n_episodes}ep.npy")
 
         if os.path.exists(cache_path):
             print(f"  Loading cached CLIP embeddings from {cache_path}")
-            npz = np.load(cache_path)
-            emb_matrix = npz['embeddings']  # (n_unique, dim)
-            key_order = list(npz['key_order'])
-            key_to_idx = {k: i for i, k in enumerate(key_order)}
-            embeddings = []
-            for k in ep_to_key:
-                idx = key_to_idx.get(k, 0)
-                embeddings.append(emb_matrix[idx])
-            print(f"  Loaded {len(emb_matrix)} embeddings (dim={emb_matrix.shape[1]})")
+            all_emb = np.load(cache_path)  # (n_episodes, dim)
+            embeddings = [all_emb[i] for i in range(n_episodes)]
+            print(f"  Loaded {all_emb.shape[0]} embeddings (dim={all_emb.shape[1]})")
             return embeddings
 
         # ------- run CLIP text encoder -------
@@ -399,52 +391,46 @@ class LiberoVideoDataset(Dataset):
         clip_model.eval()
 
         # Compute one embedding per unique token set
-        key_order_list = sorted(unique_keys.keys())
         key_to_token = {}
         for tok_pair, k in zip(ep_tokens, ep_to_key):
             if k not in key_to_token and tok_pair is not None:
                 key_to_token[k] = tok_pair
 
-        emb_list = []
+        key_to_emb = {}
         with torch.no_grad():
-            for k in key_order_list:
+            for k in unique_keys:
                 if k == b"__none__":
-                    emb_list.append(np.zeros(self.text_latent_dim, dtype=np.float32))
+                    key_to_emb[k] = np.zeros(self.text_latent_dim, dtype=np.float32)
                     continue
                 tok_pair = key_to_token[k]
-                input_ids = torch.from_numpy(tok_pair[0]).unsqueeze(0).long()       # (1, 30)
-                attention_mask = torch.from_numpy(tok_pair[1]).unsqueeze(0).long()   # (1, 30)
+                input_ids = torch.from_numpy(tok_pair[0]).unsqueeze(0).long()
+                attention_mask = torch.from_numpy(tok_pair[1]).unsqueeze(0).long()
 
-                # Robust: use text_model + text_projection directly
                 text_outputs = clip_model.text_model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                 )
-                pooled_output = text_outputs[1]                       # (1, dim)
+                pooled_output = text_outputs[1]
                 text_features = clip_model.text_projection(pooled_output)
                 text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-                emb = text_features.squeeze(0).cpu().numpy()          # (dim,)
-                emb_list.append(emb)
-                print(f"    token hash ...{k[-8:].hex()} -> dim {emb.shape[0]}")
+                emb = text_features.squeeze(0).cpu().numpy()
+                key_to_emb[k] = emb
+                print(f"    Computed embedding dim={emb.shape[0]}")
 
         del clip_model
 
-        emb_matrix = np.stack(emb_list, axis=0)   # (n_unique, dim)
+        # Build per-episode embedding list
+        embeddings = [key_to_emb[k] for k in ep_to_key]
 
-        # Save cache
+        # Save cache as a simple (n_episodes, dim) float32 matrix
         try:
-            np.savez(
-                cache_path,
-                embeddings=emb_matrix,
-                key_order=np.array(key_order_list, dtype=object),
-            )
-            print(f"  Saved CLIP embeddings cache to {cache_path}")
+            all_emb = np.stack(embeddings, axis=0)  # (n_episodes, dim)
+            np.save(cache_path, all_emb)
+            print(f"  Saved CLIP embeddings cache to {cache_path} "
+                  f"shape={all_emb.shape}")
         except Exception as e:
             print(f"  Warning: could not save cache: {e}")
 
-        # Map each episode to its embedding
-        key_to_emb = {k: emb_list[i] for i, k in enumerate(key_order_list)}
-        embeddings = [key_to_emb[k] for k in ep_to_key]
         return embeddings
 
     # ------------------------------------------------------------------
