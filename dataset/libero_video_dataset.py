@@ -159,15 +159,22 @@ class LiberoVideoDataset(Dataset):
 
         # Bypass torch.load security check on PyTorch < 2.6
         # (safe here: we only load the public CLIP model from HuggingFace)
-        import transformers.utils.import_utils as _tf_import_utils
-        _orig_check = getattr(_tf_import_utils, 'check_torch_load_is_safe', None)
-        if _orig_check is not None:
-            _tf_import_utils.check_torch_load_is_safe = lambda: None
+        _noop = lambda: None
+        _patches = {}
+        for mod_name in ['transformers.utils.import_utils', 'transformers.modeling_utils']:
+            try:
+                import importlib
+                mod = importlib.import_module(mod_name)
+                if hasattr(mod, 'check_torch_load_is_safe'):
+                    _patches[mod] = mod.check_torch_load_is_safe
+                    mod.check_torch_load_is_safe = _noop
+            except Exception:
+                pass
         try:
             clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
         finally:
-            if _orig_check is not None:
-                _tf_import_utils.check_torch_load_is_safe = _orig_check
+            for mod, orig_fn in _patches.items():
+                mod.check_torch_load_is_safe = orig_fn
         clip_model.eval()
 
         print(f"  Unique language goals: {len(unique_languages)}")
