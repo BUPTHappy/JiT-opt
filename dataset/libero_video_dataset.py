@@ -1,6 +1,10 @@
 """
 LIBERO-10 Video Dataset for JiT-opt.
-Loads LIBERO HDF5 files and outputs condition_frames / target_frame pairs,
+Supports two loading modes:
+  1. From UVA's zarr cache  (libero_10_clip.zarr.zip) – fast, recommended
+  2. From raw HDF5 files    (*.hdf5)                  – fallback
+
+Outputs condition_frames / target_frame pairs,
 with optional CLIP text embeddings for language-conditioned generation.
 """
 import os
@@ -9,24 +13,20 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 import torch.nn.functional as F
-import h5py
-from typing import Optional, List
+from typing import Optional
 
 
 class LiberoVideoDataset(Dataset):
     """
     Dataset for LIBERO-10 video frame prediction.
-    
-    Expected directory structure:
-        data_path/
-        ├── LIVING_ROOM_SCENE2_put_both_the_alphabet_soup_and_the_tomato_sauce_in_the_basket_demo.hdf5
-        ├── KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it_demo.hdf5
-        └── ... (10 .hdf5 files total)
-    
-    Each HDF5 file contains:
-        data/demo_0/obs/agentview_rgb  -> (T, H, W, 3) uint8
-        data/demo_0/actions            -> (T, action_dim) float
-        ...
+
+    The dataset can load from:
+    A) A zarr cache produced by UVA (``<dataset_path>_clip.zarr.zip``).
+       This contains images, CLIP tokens, and episode boundaries.
+    B) Raw HDF5 files in ``<dataset_path>/*.hdf5``.
+
+    If the zarr cache is found, it is used automatically unless
+    ``force_hdf5=True``.
     """
 
     def __init__(
@@ -41,6 +41,8 @@ class LiberoVideoDataset(Dataset):
         camera_key: str = 'agentview_rgb',
         data_aug: bool = False,
         seed: int = 42,
+        force_hdf5: bool = False,
+        clip_zarr_path: Optional[str] = None,
         **kwargs,
     ):
         super().__init__()
@@ -54,44 +56,23 @@ class LiberoVideoDataset(Dataset):
         self.use_text_condition = use_text_condition
         self.text_latent_dim = text_latent_dim
 
-        # Load all HDF5 files
-        hdf5_paths = sorted(glob.glob(os.path.join(dataset_path, "*.hdf5")))
-        if len(hdf5_paths) == 0:
-            raise FileNotFoundError(f"No .hdf5 files found in {dataset_path}")
-        print(f"Found {len(hdf5_paths)} HDF5 files in {dataset_path}")
+        # Detect zarr cache path
+        if clip_zarr_path is None:
+            clip_zarr_path = dataset_path.rstrip('/') + "_clip.zarr.zip"
 
-        # Pre-load all data into memory
-        self.all_images = []       # list of (T, H, W, 3) uint8 arrays per episode
-        self.all_languages = []    # list of language strings per episode
-        self.episode_lengths = []  # length of each episode
-
-        for hdf5_path in hdf5_paths:
-            # Extract language goal from filename:
-            # "KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it_demo.hdf5"
-            # -> "KITCHEN SCENE3 turn on the stove and put the moka pot on it"
-            filename = os.path.basename(hdf5_path)
-            language_goal = " ".join(filename[:-10].split("_"))  # remove "_demo.hdf5"
-
-            print(f"  Loading: {filename}")
-            print(f"    Language: \"{language_goal}\"")
-
-            with h5py.File(hdf5_path, 'r') as f:
-                demos = f['data']
-                n_demos = len(demos)
-                print(f"    Demos: {n_demos}")
-
-                for i in range(n_demos):
-                    demo = demos[f'demo_{i}']
-                    images = demo['obs'][self.camera_key][:]  # (T, H, W, 3) uint8
-                    self.all_images.append(images)
-                    self.all_languages.append(language_goal)
-                    self.episode_lengths.append(images.shape[0])
+        # Choose loading strategy
+        if not force_hdf5 and os.path.exists(clip_zarr_path):
+            print(f"[LiberoVideoDataset] Loading from zarr cache: {clip_zarr_path}")
+            self._load_from_zarr(clip_zarr_path)
+        else:
+            print(f"[LiberoVideoDataset] Loading from HDF5 files: {dataset_path}")
+            self._load_from_hdf5(dataset_path)
 
         n_episodes = len(self.all_images)
         total_frames = sum(self.episode_lengths)
         print(f"Loaded {n_episodes} episodes, {total_frames} total frames")
 
-        # Pre-compute CLIP text embeddings (if needed)
+        # Compute CLIP text embeddings (if needed)
         self.text_embeddings = None
         if use_text_condition:
             self.text_embeddings = self._compute_clip_embeddings()
@@ -122,48 +103,188 @@ class LiberoVideoDataset(Dataset):
 
         print(f"Total {len(self.index_pool)} samples")
 
+    # ------------------------------------------------------------------
+    # Loading backends
+    # ------------------------------------------------------------------
+
+    def _load_from_zarr(self, zarr_path: str):
+        """Load images + language tokens from UVA zarr cache."""
+        import zarr
+
+        with zarr.ZipStore(zarr_path, mode='r') as store:
+            root = zarr.group(store=store)
+            data = root['data']
+            meta = root['meta']
+
+            # Episode boundaries
+            episode_ends = meta['episode_ends'][:]        # (n_episodes,)
+            episode_starts = np.concatenate([[0], episode_ends[:-1]])
+
+            # Images – shape (n_steps, H, W, 3) uint8
+            all_images_flat = data[self.camera_key][:]
+
+            # Language tokens – shape (n_steps, 2, 30)
+            #   dim-1 = [input_ids, attention_mask]
+            has_language = 'language' in data
+            all_lang_tokens_flat = data['language'][:] if has_language else None
+
+        # Slice into per-episode lists
+        self.all_images = []
+        self.all_languages = []        # store language *strings* (for caching key)
+        self._clip_tokens = []         # store (input_ids, attention_mask) tuples
+        self.episode_lengths = []
+
+        for ep_idx in range(len(episode_ends)):
+            s = int(episode_starts[ep_idx])
+            e = int(episode_ends[ep_idx])
+            self.all_images.append(all_images_flat[s:e])
+            self.episode_lengths.append(e - s)
+
+            if has_language and all_lang_tokens_flat is not None:
+                # All frames of an episode share the same language
+                # Take the first frame's tokens
+                token_pair = all_lang_tokens_flat[s]  # (2, 30)
+                input_ids = token_pair[0].astype(np.int64)       # (30,)
+                attention_mask = token_pair[1].astype(np.int64)   # (30,)
+                self._clip_tokens.append((input_ids, attention_mask))
+                # Reconstruct a pseudo-string key for caching
+                self.all_languages.append(f"zarr_ep_{ep_idx}")
+            else:
+                self._clip_tokens.append(None)
+                self.all_languages.append("")
+
+        print(f"  Zarr: {len(self.all_images)} episodes, "
+              f"language tokens: {has_language}")
+
+    def _load_from_hdf5(self, dataset_path: str):
+        """Load images + language strings from raw HDF5 files."""
+        import h5py
+
+        hdf5_paths = sorted(glob.glob(os.path.join(dataset_path, "*.hdf5")))
+        if len(hdf5_paths) == 0:
+            raise FileNotFoundError(f"No .hdf5 files found in {dataset_path}")
+        print(f"Found {len(hdf5_paths)} HDF5 files in {dataset_path}")
+
+        self.all_images = []
+        self.all_languages = []
+        self._clip_tokens = []     # will stay empty; embeddings computed from text
+        self.episode_lengths = []
+
+        for hdf5_path in hdf5_paths:
+            filename = os.path.basename(hdf5_path)
+            language_goal = " ".join(filename[:-10].split("_"))  # remove "_demo.hdf5"
+
+            print(f"  Loading: {filename}")
+            print(f"    Language: \"{language_goal}\"")
+
+            with h5py.File(hdf5_path, 'r') as f:
+                demos = f['data']
+                n_demos = len(demos)
+                print(f"    Demos: {n_demos}")
+
+                for i in range(n_demos):
+                    demo = demos[f'demo_{i}']
+                    images = demo['obs'][self.camera_key][:]  # (T, H, W, 3) uint8
+                    self.all_images.append(images)
+                    self.all_languages.append(language_goal)
+                    self._clip_tokens.append(None)
+                    self.episode_lengths.append(images.shape[0])
+
+    # ------------------------------------------------------------------
+    # CLIP embeddings
+    # ------------------------------------------------------------------
+
     def _compute_clip_embeddings(self):
-        """Pre-compute CLIP text embeddings for all unique language goals.
-        
-        Uses caching to avoid recomputation and handles distributed training
-        by computing only once and saving to disk.
+        """Pre-compute CLIP text embeddings for all episodes.
+
+        If the data was loaded from a zarr cache, the CLIP *tokens* are
+        already available – we only need to run the text encoder once per
+        unique token set.  Otherwise, we tokenise the language strings.
+
+        Results are cached to a .npz file next to the dataset.
         """
         import hashlib
         import json
 
-        # Create a deterministic cache key from the language goals
-        unique_languages = sorted(set(self.all_languages))
-        cache_key = hashlib.md5(json.dumps(unique_languages).encode()).hexdigest()[:12]
-        cache_path = os.path.join(self.dataset_path, f".clip_embeddings_cache_{cache_key}.npz")
+        n_episodes = len(self.all_images)
 
-        # Try loading from cache first
+        # ------- build per-episode (input_ids, attention_mask) pairs --------
+        has_zarr_tokens = any(t is not None for t in self._clip_tokens)
+
+        if has_zarr_tokens:
+            # Tokens already loaded from zarr – just use them
+            ep_tokens = self._clip_tokens  # list of (input_ids, attention_mask) or None
+        else:
+            # Tokenise from language strings
+            try:
+                from transformers import AutoTokenizer
+            except ImportError:
+                raise ImportError("pip install transformers")
+            tokenizer = AutoTokenizer.from_pretrained("openai/clip-vit-base-patch32")
+            ep_tokens = []
+            for lang in self.all_languages:
+                tok = tokenizer(
+                    lang, padding="max_length", max_length=30,
+                    truncation=True, return_tensors="np",
+                )
+                ep_tokens.append((
+                    tok['input_ids'][0].astype(np.int64),
+                    tok['attention_mask'][0].astype(np.int64),
+                ))
+
+        # ------- deduplicate: many episodes share the same language ---------
+        # key = (input_ids_bytes, attention_mask_bytes) -> embedding
+        unique_keys = {}    # key -> index
+        ep_to_key = []
+        for tok_pair in ep_tokens:
+            if tok_pair is None:
+                # fallback – zero embedding
+                k = b"__none__"
+            else:
+                k = tok_pair[0].tobytes() + tok_pair[1].tobytes()
+            if k not in unique_keys:
+                unique_keys[k] = len(unique_keys)
+            ep_to_key.append(k)
+
+        n_unique = len(unique_keys)
+        print(f"  Unique language conditions: {n_unique}")
+
+        # ------- cache file -------
+        sorted_keys = sorted(unique_keys.keys())
+        cache_hash = hashlib.md5(b"".join(sorted_keys)).hexdigest()[:12]
+        cache_dir = self.dataset_path if os.path.isdir(self.dataset_path) else os.path.dirname(self.dataset_path)
+        cache_path = os.path.join(cache_dir, f".clip_embeddings_cache_{cache_hash}.npz")
+
         if os.path.exists(cache_path):
-            print(f"Loading cached CLIP embeddings from {cache_path}")
-            cache = np.load(cache_path, allow_pickle=True)
-            lang_to_embedding = {k: cache[k] for k in cache.files}
-            embeddings = [lang_to_embedding[lang] for lang in self.all_languages]
-            print(f"  Loaded {len(lang_to_embedding)} unique embeddings")
+            print(f"  Loading cached CLIP embeddings from {cache_path}")
+            npz = np.load(cache_path)
+            emb_matrix = npz['embeddings']  # (n_unique, dim)
+            key_order = list(npz['key_order'])
+            key_to_idx = {k: i for i, k in enumerate(key_order)}
+            embeddings = []
+            for k in ep_to_key:
+                idx = key_to_idx.get(k, 0)
+                embeddings.append(emb_matrix[idx])
+            print(f"  Loaded {len(emb_matrix)} embeddings (dim={emb_matrix.shape[1]})")
             return embeddings
 
-        # Compute embeddings
+        # ------- run CLIP text encoder -------
+        print("  Computing CLIP text embeddings with text encoder...")
+
         try:
-            from transformers import CLIPModel, AutoTokenizer
+            from transformers import CLIPModel
         except ImportError:
-            raise ImportError(
-                "transformers is required for CLIP text embeddings. "
-                "Install with: pip install transformers"
-            )
+            raise ImportError("pip install transformers")
 
-        print("Computing CLIP text embeddings...")
-        tokenizer = AutoTokenizer.from_pretrained("openai/clip-vit-base-patch32")
-
-        # Bypass torch.load security check on PyTorch < 2.6
-        # (safe here: we only load the public CLIP model from HuggingFace)
+        # Bypass torch.load security check for older PyTorch
         _noop = lambda: None
         _patches = {}
-        for mod_name in ['transformers.utils.import_utils', 'transformers.modeling_utils']:
+        import importlib
+        for mod_name in [
+            'transformers.utils.import_utils',
+            'transformers.modeling_utils',
+        ]:
             try:
-                import importlib
                 mod = importlib.import_module(mod_name)
                 if hasattr(mod, 'check_torch_load_is_safe'):
                     _patches[mod] = mod.check_torch_load_is_safe
@@ -171,46 +292,76 @@ class LiberoVideoDataset(Dataset):
             except Exception:
                 pass
         try:
+            import transformers.modeling_utils as _tm
+            if hasattr(_tm, 'load_state_dict'):
+                _patches.setdefault(_tm, getattr(_tm, 'check_torch_load_is_safe', _noop))
+                if 'check_torch_load_is_safe' in _tm.load_state_dict.__globals__:
+                    _tm.load_state_dict.__globals__['check_torch_load_is_safe'] = _noop
+        except Exception:
+            pass
+
+        try:
             clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
         finally:
             for mod, orig_fn in _patches.items():
-                mod.check_torch_load_is_safe = orig_fn
+                try:
+                    mod.check_torch_load_is_safe = orig_fn
+                except Exception:
+                    pass
         clip_model.eval()
 
-        print(f"  Unique language goals: {len(unique_languages)}")
+        # Compute one embedding per unique token set
+        key_order_list = sorted(unique_keys.keys())
+        key_to_token = {}
+        for tok_pair, k in zip(ep_tokens, ep_to_key):
+            if k not in key_to_token and tok_pair is not None:
+                key_to_token[k] = tok_pair
 
-        # Compute embeddings for each unique language
-        lang_to_embedding = {}
+        emb_list = []
         with torch.no_grad():
-            for lang in unique_languages:
-                tokens = tokenizer(
-                    lang,
-                    padding="max_length",
-                    max_length=30,
-                    truncation=True,
-                    return_tensors="pt",
+            for k in key_order_list:
+                if k == b"__none__":
+                    emb_list.append(np.zeros(self.text_latent_dim, dtype=np.float32))
+                    continue
+                tok_pair = key_to_token[k]
+                input_ids = torch.from_numpy(tok_pair[0]).unsqueeze(0).long()       # (1, 30)
+                attention_mask = torch.from_numpy(tok_pair[1]).unsqueeze(0).long()   # (1, 30)
+
+                # Robust: use text_model + text_projection directly
+                text_outputs = clip_model.text_model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
                 )
-                text_features = clip_model.get_text_features(
-                    input_ids=tokens['input_ids'],
-                    attention_mask=tokens['attention_mask'],
-                )
-                # Normalize (standard CLIP practice)
+                pooled_output = text_outputs[1]                       # (1, dim)
+                text_features = clip_model.text_projection(pooled_output)
                 text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-                lang_to_embedding[lang] = text_features.squeeze(0).numpy()  # (512,)
-                print(f"    \"{lang[:60]}...\" -> dim {text_features.shape[-1]}")
+                emb = text_features.squeeze(0).cpu().numpy()          # (dim,)
+                emb_list.append(emb)
+                print(f"    token hash ...{k[-8:].hex()} -> dim {emb.shape[0]}")
 
-        del clip_model  # Free memory
+        del clip_model
 
-        # Save cache to disk (so other ranks / future runs can reuse)
+        emb_matrix = np.stack(emb_list, axis=0)   # (n_unique, dim)
+
+        # Save cache
         try:
-            np.savez(cache_path, **lang_to_embedding)
+            np.savez(
+                cache_path,
+                embeddings=emb_matrix,
+                key_order=np.array(key_order_list, dtype=object),
+            )
             print(f"  Saved CLIP embeddings cache to {cache_path}")
         except Exception as e:
-            print(f"  Warning: Could not save cache: {e}")
+            print(f"  Warning: could not save cache: {e}")
 
         # Map each episode to its embedding
-        embeddings = [lang_to_embedding[lang] for lang in self.all_languages]
+        key_to_emb = {k: emb_list[i] for i, k in enumerate(key_order_list)}
+        embeddings = [key_to_emb[k] for k in ep_to_key]
         return embeddings
+
+    # ------------------------------------------------------------------
+    # Dataset interface
+    # ------------------------------------------------------------------
 
     def __len__(self):
         return len(self.index_pool)
@@ -240,12 +391,12 @@ class LiberoVideoDataset(Dataset):
 
         original_height, original_width = target_frame.shape[:2]
 
-        # Convert to torch tensors, CHW format, normalize to [-1, 1]
+        # Convert to torch tensors, CHW format, normalise to [-1, 1]
         condition_frames = torch.from_numpy(condition_frames).float()
         target_frame = torch.from_numpy(target_frame).float()
 
         condition_frames = condition_frames.permute(0, 3, 1, 2) / 127.5 - 1.0  # (N, 3, H, W)
-        target_frame = target_frame.permute(2, 0, 1) / 127.5 - 1.0  # (3, H, W)
+        target_frame = target_frame.permute(2, 0, 1) / 127.5 - 1.0             # (3, H, W)
 
         # Resize if needed
         if original_height != self.image_size or original_width != self.image_size:
@@ -258,7 +409,7 @@ class LiberoVideoDataset(Dataset):
                 mode='bilinear', align_corners=False,
             ).squeeze(0)
 
-        # Data augmentation (color jitter, consistent across frames)
+        # Data augmentation (colour jitter, consistent across frames)
         if self.data_aug:
             import torchvision.transforms as transforms
             video_seed = torch.randint(0, 10000, (1,)).item()
@@ -268,7 +419,6 @@ class LiberoVideoDataset(Dataset):
                 aug = transforms.ColorJitter(
                     brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05
                 )
-                # ColorJitter expects [0,1], convert then convert back
                 frame_01 = (frame + 1.0) / 2.0
                 frame_01 = aug(frame_01)
                 return frame_01 * 2.0 - 1.0
@@ -277,8 +427,8 @@ class LiberoVideoDataset(Dataset):
             target_frame = _augment(target_frame)
 
         result = {
-            'condition_frames': condition_frames,  # (max_condition_frames, C, H, W)
-            'target_frame': target_frame,  # (C, H, W)
+            'condition_frames': condition_frames,   # (max_condition_frames, C, H, W)
+            'target_frame': target_frame,           # (C, H, W)
         }
 
         # Add text latents if using language conditioning
