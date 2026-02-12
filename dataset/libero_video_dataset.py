@@ -60,10 +60,22 @@ class LiberoVideoDataset(Dataset):
         if clip_zarr_path is None:
             clip_zarr_path = dataset_path.rstrip('/') + "_clip.zarr.zip"
 
-        # Choose loading strategy
-        if not force_hdf5 and os.path.exists(clip_zarr_path):
-            print(f"[LiberoVideoDataset] Loading from zarr cache: {clip_zarr_path}")
-            self._load_from_zarr(clip_zarr_path)
+        # Choose loading strategy:
+        #  1. zarr cache exists -> try loading images+tokens from zarr
+        #     if Jpeg2k codec unavailable -> hybrid: images from HDF5, tokens from zarr
+        #  2. no zarr cache -> pure HDF5
+        zarr_available = (not force_hdf5) and os.path.exists(clip_zarr_path)
+        if zarr_available:
+            try:
+                print(f"[LiberoVideoDataset] Loading from zarr cache: {clip_zarr_path}")
+                self._load_from_zarr(clip_zarr_path)
+            except ValueError as e:
+                if 'codec not available' in str(e):
+                    print(f"[LiberoVideoDataset] Jpeg2k codec unavailable, "
+                          f"using hybrid mode (images from HDF5, tokens from zarr)")
+                    self._load_hybrid(dataset_path, clip_zarr_path)
+                else:
+                    raise
         else:
             print(f"[LiberoVideoDataset] Loading from HDF5 files: {dataset_path}")
             self._load_from_hdf5(dataset_path)
@@ -189,6 +201,82 @@ class LiberoVideoDataset(Dataset):
                     self.all_languages.append(language_goal)
                     self._clip_tokens.append(None)
                     self.episode_lengths.append(images.shape[0])
+
+    def _load_hybrid(self, dataset_path: str, zarr_path: str):
+        """Hybrid mode: images from HDF5, language tokens from zarr cache.
+
+        This avoids the Jpeg2k codec dependency while still leveraging
+        the pre-computed CLIP tokens from the UVA zarr cache.
+        """
+        import zarr
+        import h5py
+
+        # --- 1. Load language tokens + episode structure from zarr ---
+        print("  Loading language tokens from zarr ...")
+        with zarr.ZipStore(zarr_path, mode='r') as store:
+            root = zarr.group(store=store)
+            data = root['data']
+            meta = root['meta']
+
+            episode_ends_zarr = meta['episode_ends'][:]   # (n_episodes,)
+            episode_starts_zarr = np.concatenate([[0], episode_ends_zarr[:-1]])
+
+            has_language = 'language' in data
+            # Language array uses plain compressor (no Jpeg2k), safe to read
+            all_lang_tokens_flat = data['language'][:] if has_language else None
+
+        n_episodes_zarr = len(episode_ends_zarr)
+        print(f"  Zarr: {n_episodes_zarr} episodes, language tokens: {has_language}")
+
+        # Extract per-episode CLIP tokens from zarr
+        zarr_clip_tokens = []
+        for ep_idx in range(n_episodes_zarr):
+            if has_language and all_lang_tokens_flat is not None:
+                s = int(episode_starts_zarr[ep_idx])
+                token_pair = all_lang_tokens_flat[s]  # (2, 30)
+                input_ids = token_pair[0].astype(np.int64)
+                attention_mask = token_pair[1].astype(np.int64)
+                zarr_clip_tokens.append((input_ids, attention_mask))
+            else:
+                zarr_clip_tokens.append(None)
+
+        # --- 2. Load images from HDF5 (same order as zarr) ---
+        print("  Loading images from HDF5 files ...")
+        hdf5_paths = sorted(glob.glob(os.path.join(dataset_path, "*.hdf5")))
+        if len(hdf5_paths) == 0:
+            raise FileNotFoundError(f"No .hdf5 files found in {dataset_path}")
+
+        self.all_images = []
+        self.all_languages = []
+        self._clip_tokens = []
+        self.episode_lengths = []
+
+        zarr_ep_counter = 0
+        for hdf5_path in hdf5_paths:
+            filename = os.path.basename(hdf5_path)
+            language_goal = " ".join(filename[:-10].split("_"))
+            print(f"    Loading: {filename}")
+
+            with h5py.File(hdf5_path, 'r') as f:
+                demos = f['data']
+                n_demos = len(demos)
+
+                for i in range(n_demos):
+                    demo = demos[f'demo_{i}']
+                    images = demo['obs'][self.camera_key][:]  # (T, H, W, 3) uint8
+                    self.all_images.append(images)
+                    self.all_languages.append(language_goal)
+                    self.episode_lengths.append(images.shape[0])
+
+                    # Attach zarr CLIP tokens (same episode order)
+                    if zarr_ep_counter < len(zarr_clip_tokens):
+                        self._clip_tokens.append(zarr_clip_tokens[zarr_ep_counter])
+                    else:
+                        self._clip_tokens.append(None)
+                    zarr_ep_counter += 1
+
+        print(f"  Hybrid: {len(self.all_images)} episodes from HDF5, "
+              f"{sum(1 for t in self._clip_tokens if t is not None)} with zarr tokens")
 
     # ------------------------------------------------------------------
     # CLIP embeddings
