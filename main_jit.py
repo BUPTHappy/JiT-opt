@@ -109,6 +109,12 @@ def get_args_parser():
                         help='JSON file specifying which episodes to use (optional)')
     parser.add_argument('--image_key', type=str, default=None,
                         help='Image key in zarr data group (default: auto-detect, supports camera0_rgb for UMI and img for PushT)')
+    parser.add_argument('--dataset_type', type=str, default='umi', choices=['umi', 'libero'],
+                        help='Dataset type: umi (zarr format, for UMI/PushT) or libero (HDF5 format, for LIBERO-10)')
+    parser.add_argument('--val_ratio', type=float, default=0.05,
+                        help='Validation ratio for dataset split (used by LIBERO)')
+    parser.add_argument('--data_aug', action='store_true',
+                        help='Enable data augmentation (ColorJitter for LIBERO)')
     
     # checkpointing
     parser.add_argument('--output_dir', default='./output_dir',
@@ -179,9 +185,24 @@ def main(args):
         )
         print(f"W&B logging enabled: {wandb.run.url}")
 
-    # Data loading: 支持两种模式
-    if args.use_condition_frames:
-        # 视频帧模式：使用自定义数据集
+    # Data loading: 支持三种模式
+    if args.use_condition_frames and args.dataset_type == 'libero':
+        # LIBERO 模式：HDF5 格式，支持语言条件
+        from dataset.libero_video_dataset import LiberoVideoDataset
+
+        dataset_train = LiberoVideoDataset(
+            dataset_path=args.data_path,
+            max_condition_frames=args.max_condition_frames,
+            image_size=args.img_size,
+            split='train',
+            val_ratio=args.val_ratio,
+            use_text_condition=args.use_text_condition,
+            text_latent_dim=args.text_latent_dim,
+            data_aug=args.data_aug,
+        )
+        print(f"LIBERO dataset: {len(dataset_train)} samples")
+    elif args.use_condition_frames:
+        # UMI/PushT 模式：zarr 格式
         from dataset.umi_video_dataset import UmiVideoDataset
         
         # 解析数据集名称列表
@@ -224,15 +245,29 @@ def main(args):
     # Create validation dataloader for evaluation (only for video frame generation)
     data_loader_val = None
     if args.use_condition_frames and args.online_eval:
-        dataset_val = UmiVideoDataset(
-            dataset_root_dir=args.data_path,
-            max_condition_frames=args.max_condition_frames,
-            image_size=args.img_size,
-            split='val',
-            dataset_names=dataset_names,
-            used_episode_indices_file=args.used_episode_indices_file if args.used_episode_indices_file else None,
-            image_key=args.image_key,
-        )
+        if args.dataset_type == 'libero':
+            from dataset.libero_video_dataset import LiberoVideoDataset
+            dataset_val = LiberoVideoDataset(
+                dataset_path=args.data_path,
+                max_condition_frames=args.max_condition_frames,
+                image_size=args.img_size,
+                split='val',
+                val_ratio=args.val_ratio,
+                use_text_condition=args.use_text_condition,
+                text_latent_dim=args.text_latent_dim,
+                data_aug=False,  # no augmentation for validation
+            )
+        else:
+            from dataset.umi_video_dataset import UmiVideoDataset
+            dataset_val = UmiVideoDataset(
+                dataset_root_dir=args.data_path,
+                max_condition_frames=args.max_condition_frames,
+                image_size=args.img_size,
+                split='val',
+                dataset_names=dataset_names,
+                used_episode_indices_file=args.used_episode_indices_file if args.used_episode_indices_file else None,
+                image_key=args.image_key,
+            )
         print(f"Validation dataset: {len(dataset_val)} samples")
         sampler_val = torch.utils.data.DistributedSampler(
             dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False

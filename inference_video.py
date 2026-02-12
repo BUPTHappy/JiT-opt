@@ -73,6 +73,14 @@ def get_args_parser():
     parser.add_argument('--save_images', action='store_true', default=True,
                         help='Save individual sample images (set to False to save disk space)')
     
+    # LIBERO support
+    parser.add_argument('--dataset_type', type=str, default='umi', choices=['umi', 'libero'],
+                        help='Dataset type: umi (zarr, for UMI/PushT) or libero (HDF5)')
+    parser.add_argument('--use_text_condition', action='store_true',
+                        help='Use text condition (for LIBERO language-conditioned generation)')
+    parser.add_argument('--text_latent_dim', type=int, default=512,
+                        help='Text latent dimension (CLIP)')
+
     return parser
 
 
@@ -140,12 +148,17 @@ def generate_video_frames(model, dataloader, args):
             
             condition_frames = condition_frames[:actual_batch_size]
             target_frame = target_frame[:actual_batch_size]
+
+            # Handle text latents (for LIBERO language conditioning)
+            text_latents = None
+            if 'text_latents' in batch:
+                text_latents = batch['text_latents'].to(args.device)[:actual_batch_size]
             
             print(f"Generating batch {batch_idx + 1}, samples {sample_count + 1}-{sample_count + actual_batch_size}")
             print(f"  condition_frames shape: {condition_frames.shape}, range: [{condition_frames.min():.3f}, {condition_frames.max():.3f}]")
             
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                generated_frames = model.generate(condition_frames=condition_frames)
+                generated_frames = model.generate(condition_frames=condition_frames, text_latents=text_latents)
             
             print(f"  generated_frames shape: {generated_frames.shape}, range: [{generated_frames.min():.3f}, {generated_frames.max():.3f}]")
             
@@ -265,17 +278,32 @@ def main(args):
     args.device = device
     
     print(f"Using device: {device}")
-    
-    dataset_names = args.dataset_names.split(',')
-    
-    dataset = UmiVideoDataset(
-        dataset_root_dir=args.data_path,
-        max_condition_frames=args.max_condition_frames,
-        image_size=args.img_size,
-        split=args.split,
-        dataset_names=dataset_names,
-        image_key=getattr(args, 'image_key', None),
-    )
+
+    # Create dataset based on type
+    dataset_type = getattr(args, 'dataset_type', 'umi')
+    use_text_condition = getattr(args, 'use_text_condition', False)
+    text_latent_dim = getattr(args, 'text_latent_dim', 512)
+
+    if dataset_type == 'libero':
+        from dataset.libero_video_dataset import LiberoVideoDataset
+        dataset = LiberoVideoDataset(
+            dataset_path=args.data_path,
+            max_condition_frames=args.max_condition_frames,
+            image_size=args.img_size,
+            split=args.split,
+            use_text_condition=use_text_condition,
+            text_latent_dim=text_latent_dim,
+        )
+    else:
+        dataset_names = args.dataset_names.split(',')
+        dataset = UmiVideoDataset(
+            dataset_root_dir=args.data_path,
+            max_condition_frames=args.max_condition_frames,
+            image_size=args.img_size,
+            split=args.split,
+            dataset_names=dataset_names,
+            image_key=getattr(args, 'image_key', None),
+        )
     
     dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -291,8 +319,8 @@ def main(args):
         model=args.model,
         img_size=args.img_size,
         max_condition_frames=args.max_condition_frames,
-        text_latent_dim=512,
-        use_text_condition=False,
+        text_latent_dim=text_latent_dim,
+        use_text_condition=use_text_condition,
         sampling_method=args.sampling_method,
         num_sampling_steps=args.num_sampling_steps,
         cfg=args.cfg,
