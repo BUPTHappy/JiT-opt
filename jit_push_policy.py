@@ -13,7 +13,7 @@ import numpy as np
 # Add UVA path for imports
 _UVA_ROOT = os.path.join(os.path.dirname(__file__), '..', 'unified_video_action')
 if os.path.exists(_UVA_ROOT) and _UVA_ROOT not in sys.path:
-    sys.path.insert(0, _UVA_ROOT)
+    sys.path.append(_UVA_ROOT)
 
 from unified_video_action.policy.base_image_policy import BaseImagePolicy
 from unified_video_action.model.common.normalizer import LinearNormalizer

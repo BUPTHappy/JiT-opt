@@ -386,21 +386,11 @@ def run_pusht_success_eval(model_without_ddp, args, epoch, log_writer=None):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     uva_root = os.path.join(script_dir, "..", "unified_video_action")
 
-    # Save JiT's util.misc before importing UVA (avoid module name collision)
-    _saved_util_misc = sys.modules.get("util.misc")
-    _saved_util = sys.modules.get("util")
-
     if uva_root not in sys.path:
-        sys.path.insert(0, uva_root)
+        sys.path.append(uva_root)  # append, not insert, to avoid overriding JiT's util.misc
 
     from jit_push_policy import JitPushTPolicy
     from unified_video_action.env_runner.pusht_image_runner import PushTImageRunner
-
-    # Restore JiT's util.misc
-    if _saved_util_misc is not None:
-        sys.modules["util.misc"] = _saved_util_misc
-    if _saved_util is not None:
-        sys.modules["util"] = _saved_util
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     output_dir = getattr(args, "output_dir", "./output_dir")
