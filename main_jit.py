@@ -380,7 +380,12 @@ def main(args):
         # Store checkpoint info for later optimizer loading
         checkpoint_epoch = checkpoint.get('epoch', 0)
         checkpoint_optimizer = checkpoint.get('optimizer', None)
-        args.start_epoch = checkpoint_epoch + 1
+        # When fine-tuning with different loss (action_only_loss), reset epoch to 0
+        if getattr(args, 'action_only_loss', False) or getattr(args, 'freeze_backbone', False):
+            args.start_epoch = 0
+            print(f"Fine-tuning mode: resetting start_epoch to 0 (checkpoint was at epoch {checkpoint_epoch})")
+        else:
+            args.start_epoch = checkpoint_epoch + 1
         del checkpoint
     else:
         model_without_ddp.ema_params1 = copy.deepcopy(list(model_without_ddp.parameters()))
