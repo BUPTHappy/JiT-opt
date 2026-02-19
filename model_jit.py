@@ -231,7 +231,8 @@ class JiT(nn.Module):
         in_context_start=8,
         max_condition_frames=2, # 窗口条件帧数
         text_latent_dim=512, # 文本特征维度
-        use_text_condition=False 
+        use_text_condition=False,
+        action_dim=10  # Action dimension (default 10 for UMI, 2 for pushT)
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -301,13 +302,15 @@ class JiT(nn.Module):
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
 
         # action prediction head (for video-to-action task)
+        # Compatible with different datasets: UMI (10-dim) and pushT (2-dim)
+        self.action_dim = action_dim
         self.action_pooler = nn.AdaptiveAvgPool1d(1)  # Global average pooling over sequence dimension
         self.action_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
             nn.SiLU(),
             nn.Linear(hidden_size // 2, hidden_size // 4),
             nn.SiLU(),
-            nn.Linear(hidden_size // 4, 10)  # UMI action dimension: 10 (pose 9 + gripper 1)
+            nn.Linear(hidden_size // 4, action_dim)  # Configurable action dimension
         )
 
         self.initialize_weights()
@@ -440,7 +443,7 @@ class JiT(nn.Module):
             # Global average pooling over sequence dimension
             action_features = self.action_pooler(x.transpose(1, 2))  # (N, hidden_size, 1)
             action_features = action_features.squeeze(-1)  # (N, hidden_size)
-            action_pred = self.action_head(action_features)  # (N, 10)
+            action_pred = self.action_head(action_features)  # (N, action_dim)
 
         x = self.final_layer(x, c)
         output = self.unpatchify(x, self.patch_size)

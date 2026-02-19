@@ -13,6 +13,7 @@ class Denoiser(nn.Module):
         max_condition_frames = getattr(args, 'max_condition_frames', 2)
         text_latent_dim = getattr(args, 'text_latent_dim', 512)
         use_text_condition = getattr(args, 'use_text_condition', False)
+        action_dim = getattr(args, 'action_dim', 10)  # Default 10 for UMI, can be set to 2 for pushT
 
         self.net = JiT_models[args.model](  #通过args.model选择模型架构
             input_size=args.img_size,
@@ -23,6 +24,7 @@ class Denoiser(nn.Module):
             max_condition_frames=max_condition_frames,
             text_latent_dim=text_latent_dim,
             use_text_condition=use_text_condition,
+            action_dim=action_dim,
         )
         self.img_size = args.img_size
         self.num_classes = args.class_num
@@ -36,6 +38,7 @@ class Denoiser(nn.Module):
         # action prediction weight (for multi-task learning)
         self.action_loss_weight = getattr(args, 'action_loss_weight', 0.1)
         self.freeze_backbone = getattr(args, 'freeze_backbone', False)
+        self.action_only_loss = getattr(args, 'action_only_loss', False)  # action-only fine-tune, all params trainable
 
         self.P_mean = args.P_mean #时间步采样的均值
         self.P_std = args.P_std #时间步采样的标准差
@@ -101,10 +104,10 @@ class Denoiser(nn.Module):
         # 注意：condition_frames的dropout需要在batch级别处理
         # 为了简化，在训练时随机将整个batch的condition_frames设置为None
         # 这样模型会学习：50%的时间有条件，50%的时间无条件
-        # 但是，如果freeze_backbone=True（只训练action），我们不应该drop condition_frames
+        # 但是，如果freeze_backbone=True或action_only_loss=True（只训练/微调action），我们不应该drop condition_frames
         # 因为action需要从condition_frames中提取
         condition_frames_dropped = condition_frames
-        if condition_frames is not None and self.training and not self.freeze_backbone:
+        if condition_frames is not None and self.training and not self.freeze_backbone and not self.action_only_loss:
             # 随机drop整个batch的condition_frames（用于CFG训练）
             # 但是当freeze_backbone=True时，不drop，因为需要condition_frames来提取action
             if torch.rand(1, device=condition_frames.device).item() < self.condition_drop_prob:
@@ -131,9 +134,9 @@ class Denoiser(nn.Module):
         v_pred = (x_pred - z) / (1 - t).clamp_min(self.t_eps)
 
         # Image generation loss (L2)
-        # Skip if backbone is frozen (no need to compute, saves computation)
+        # Skip when backbone frozen or action-only mode (saves computation)
         loss_image = None
-        if not self.freeze_backbone:
+        if not self.freeze_backbone and not self.action_only_loss:
             loss_image = (v - v_pred) ** 2
             loss_image = loss_image.mean(dim=(1, 2, 3)).mean()
 
@@ -143,12 +146,12 @@ class Denoiser(nn.Module):
             loss_action = torch.nn.functional.mse_loss(action_pred, action_gt)
         
         # Combined loss
-        if self.freeze_backbone:
-            # When backbone is frozen, only use action loss
+        if self.freeze_backbone or self.action_only_loss:
+            # Only use action loss: freeze_backbone=只训action_head, action_only_loss=全模型微调
             if loss_action is not None:
                 loss = loss_action
             else:
-                raise ValueError("freeze_backbone=True but no action_gt provided")
+                raise ValueError("action-only mode but no action_gt provided")
         else:
             # Normal training: combine both losses
             if loss_image is not None and loss_action is not None:

@@ -107,10 +107,24 @@ def get_args_parser():
         help='Weight for action prediction loss in multi-task learning')
     parser.add_argument('--freeze_backbone', action='store_true',
         help='Freeze all parameters except action_head and action_pooler (for fine-tuning)')
+    parser.add_argument('--action_only_loss', action='store_true',
+        help='Use only action loss (no image loss), all params trainable. For fine-tuning on action data.')
     parser.add_argument('--dataset_names', type=str, default='cup_arrangement_0,towel_folding_0,mouse_arrangement_0',
-                        help='Comma-separated list of dataset names for multi-task training')
+                        help='Comma-separated list of dataset names (UMI) or single name for PushT (e.g. pusht_cchi_v7_replay)')
+    parser.add_argument('--dataset_type', type=str, default='umi', choices=['umi', 'pusht'],
+                        help='Dataset type: umi or pusht')
     parser.add_argument('--used_episode_indices_file', type=str, default='',
                         help='JSON file specifying which episodes to use (optional)')
+    parser.add_argument('--action_dim', type=int, default=10,
+                        help='Action dimension (default 10 for UMI, 2 for pushT)')
+    parser.add_argument('--eval_pusht_success', action='store_true',
+                        help='When action_dim=2, run pushT env evaluation for success rate (requires UVA)')
+    parser.add_argument('--pusht_normalizer_path', type=str, default='',
+                        help='Path to normalizer.pkl for pushT eval (optional)')
+    parser.add_argument('--pusht_dataset_path', type=str, default='',
+                        help='Path to pushT zarr for fitting normalizer (optional)')
+    parser.add_argument('--pusht_wandb_video', action='store_true',
+                        help='Log PushT rollout videos to wandb (like UVA)')
     
     # checkpointing
     parser.add_argument('--output_dir', default='./output_dir',
@@ -160,21 +174,35 @@ def main(args):
 
     # Data loading: 支持两种模式
     if args.use_condition_frames:
-        # 视频帧模式：使用自定义数据集
-        from dataset.umi_video_dataset import UmiVideoDataset
-        
-        # 解析数据集名称列表
-        dataset_names = [name.strip() for name in args.dataset_names.split(',') if name.strip()]
-        
-        dataset_train = UmiVideoDataset(
-            dataset_root_dir=args.data_path,
-            max_condition_frames=args.max_condition_frames,
-            image_size=args.img_size,
-            split='train',
-            dataset_names=dataset_names,
-            used_episode_indices_file=args.used_episode_indices_file if args.used_episode_indices_file else None
-        )
-        print(f"Video dataset: {len(dataset_train)} samples")
+        dataset_type = getattr(args, 'dataset_type', 'umi')
+        if dataset_type == 'pusht':
+            from dataset.pusht_video_dataset import PushTVideoDataset
+            # PushT: data_path 为 pusht 目录，dataset_names 为 zarr 名（如 pusht_cchi_v7_replay）
+            names = [n.strip() for n in args.dataset_names.split(',') if n.strip()]
+            pusht_name = names[0] if names else 'pusht_cchi_v7_replay'
+            pusht_path = os.path.join(args.data_path, pusht_name)
+            if not pusht_path.endswith('.zarr'):
+                pusht_path = pusht_path + '.zarr'
+            if not os.path.exists(pusht_path) and os.path.exists(os.path.join(args.data_path, pusht_name)):
+                pusht_path = os.path.join(args.data_path, pusht_name)
+            dataset_train = PushTVideoDataset(
+                dataset_path=pusht_path,
+                max_condition_frames=args.max_condition_frames,
+                image_size=args.img_size,
+                split='train',
+            )
+        else:
+            from dataset.umi_video_dataset import UmiVideoDataset
+            dataset_names = [name.strip() for name in args.dataset_names.split(',') if name.strip()]
+            dataset_train = UmiVideoDataset(
+                dataset_root_dir=args.data_path,
+                max_condition_frames=args.max_condition_frames,
+                image_size=args.img_size,
+                split='train',
+                dataset_names=dataset_names,
+                used_episode_indices_file=args.used_episode_indices_file if args.used_episode_indices_file else None
+            )
+        print(f"Video dataset ({dataset_type}): {len(dataset_train)} samples")
     else:
         # ImageNet模式（兼容性）
         transform_train = transforms.Compose([
@@ -202,14 +230,30 @@ def main(args):
     # Create validation dataloader for evaluation (only for video frame generation)
     data_loader_val = None
     if args.use_condition_frames and args.online_eval:
-        dataset_val = UmiVideoDataset(
-            dataset_root_dir=args.data_path,
-            max_condition_frames=args.max_condition_frames,
-            image_size=args.img_size,
-            split='val',
-            dataset_names=dataset_names,
-            used_episode_indices_file=args.used_episode_indices_file if args.used_episode_indices_file else None
-        )
+        dataset_type = getattr(args, 'dataset_type', 'umi')
+        if dataset_type == 'pusht':
+            from dataset.pusht_video_dataset import PushTVideoDataset
+            names = [n.strip() for n in args.dataset_names.split(',') if n.strip()]
+            pusht_name = names[0] if names else 'pusht_cchi_v7_replay'
+            pusht_path = os.path.join(args.data_path, pusht_name)
+            if not pusht_path.endswith('.zarr'):
+                pusht_path = pusht_path + '.zarr'
+            dataset_val = PushTVideoDataset(
+                dataset_path=pusht_path,
+                max_condition_frames=args.max_condition_frames,
+                image_size=args.img_size,
+                split='val',
+            )
+        else:
+            dataset_names = [name.strip() for name in args.dataset_names.split(',') if name.strip()]
+            dataset_val = UmiVideoDataset(
+                dataset_root_dir=args.data_path,
+                max_condition_frames=args.max_condition_frames,
+                image_size=args.img_size,
+                split='val',
+                dataset_names=dataset_names,
+                used_episode_indices_file=args.used_episode_indices_file if args.used_episode_indices_file else None
+            )
         print(f"Validation dataset: {len(dataset_val)} samples")
         sampler_val = torch.utils.data.DistributedSampler(
             dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False
@@ -274,11 +318,18 @@ def main(args):
     if checkpoint_path and os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         # Use strict=False to allow loading checkpoints without action_head (for backward compatibility)
+        # or with different action_dim (e.g., loading UMI checkpoint for pushT training)
         missing_keys, unexpected_keys = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
         if missing_keys:
             print(f"Note: Missing keys (newly added parameters): {missing_keys[:5]}...")
+            # Check if action_head needs reinitialization due to action_dim mismatch
+            if any('action_head' in key for key in missing_keys):
+                print(f"Note: action_head will be reinitialized (action_dim={getattr(args, 'action_dim', 10)})")
         if unexpected_keys:
             print(f"Note: Unexpected keys (ignored): {unexpected_keys[:5]}...")
+            # Check if old action_head is being ignored due to action_dim mismatch
+            if any('action_head' in key for key in unexpected_keys):
+                print(f"Note: Old action_head ignored (action_dim mismatch, new action_dim={getattr(args, 'action_dim', 10)})")
 
         # Load EMA parameters (only for existing parameters)
         ema_state_dict1 = checkpoint['model_ema1']
@@ -413,6 +464,14 @@ def main(args):
             with torch.no_grad():
                 evaluate(model_without_ddp, args, epoch, batch_size=args.gen_bsz, log_writer=log_writer, data_loader_val=data_loader_val)
             torch.cuda.empty_cache()
+
+            # PushT success rate evaluation (action_dim=2 only)
+            if getattr(args, 'eval_pusht_success', False) and getattr(args, 'action_dim', 10) == 2 and misc.is_main_process():
+                try:
+                    from engine_jit import run_pusht_success_eval
+                    run_pusht_success_eval(model_without_ddp, args, epoch, log_writer)
+                except Exception as e:
+                    print(f"PushT success eval skipped: {e}")
 
         if misc.is_main_process() and log_writer is not None:
             log_writer.flush()

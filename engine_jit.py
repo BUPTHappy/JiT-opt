@@ -164,6 +164,9 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
             os.makedirs(target_folder, exist_ok=True)
         
         sample_count = 0
+        action_losses = []  # Collect action losses for evaluation
+        action_mse_list = []  # Collect action MSE for logging
+        
         for batch_idx, batch in enumerate(data_loader_val):
             if sample_count >= args.num_images:
                 break
@@ -179,11 +182,34 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
             condition_frames = condition_frames[:actual_batch_size]
             target_frame = target_frame[:actual_batch_size]
             
+            # Get action ground truth if available
+            action_gt = None
+            if 'action' in batch and batch['action'] is not None:
+                action_gt = batch['action'].to(device, non_blocking=True)[:actual_batch_size]
+            
             if batch_idx % 10 == 0:
                 print(f"  Generating batch {batch_idx + 1}, samples {sample_count + 1}-{sample_count + actual_batch_size}")
             
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 generated_frames = model_without_ddp.generate(condition_frames=condition_frames)
+                
+                # Evaluate action prediction if action_gt is available
+                if action_gt is not None:
+                    # Get action prediction from the model
+                    # We need to forward pass with return_action=True
+                    # Use a dummy noisy target_frame for action prediction (similar to training)
+                    t_dummy = torch.zeros(actual_batch_size, device=device)
+                    with torch.no_grad():
+                        _, action_pred = model_without_ddp.net(
+                            target_frame, t_dummy, 
+                            condition_frames=condition_frames,
+                            return_action=True
+                        )
+                    
+                    # Calculate action MSE
+                    action_mse = torch.nn.functional.mse_loss(action_pred, action_gt, reduction='mean')
+                    action_losses.append(action_mse.item())
+                    action_mse_list.append(action_mse.item())
             
             # Clamp and normalize generated frames
             generated_frames = torch.clamp(generated_frames, -1.0, 1.0)
@@ -217,6 +243,14 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
             sample_count += actual_batch_size
         
         print(f"Generated {sample_count} pairs of images")
+        
+        # Log action evaluation metrics
+        if action_losses and misc.get_rank() == 0:
+            avg_action_mse = np.mean(action_losses)
+            print(f"Action Prediction MSE: {avg_action_mse:.6f}")
+            if log_writer is not None:
+                log_writer.add_scalar('eval_action_mse', avg_action_mse, epoch)
+        
         torch.distributed.barrier()
         
         # Compute FID between generated and target images
@@ -319,3 +353,112 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
         shutil.rmtree(save_folder)
 
     torch.distributed.barrier()
+
+
+def run_pusht_success_eval(model_without_ddp, args, epoch, log_writer=None):
+    """
+    Run PushT environment evaluation for success rate.
+    Uses JitPushTPolicy and PushTImageRunner from UVA.
+    """
+    import pickle
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    uva_root = os.path.join(script_dir, "..", "unified_video_action")
+    if uva_root not in sys.path:
+        sys.path.insert(0, uva_root)
+
+    from jit_push_policy import JitPushTPolicy
+    from unified_video_action.env_runner.pusht_image_runner import PushTImageRunner
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    output_dir = getattr(args, "output_dir", "./output_dir")
+    output_dir = os.path.join(output_dir, "pusht_eval")
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Switch to EMA for eval
+    model_state_dict = copy.deepcopy(model_without_ddp.state_dict())
+    ema_state_dict = copy.deepcopy(model_without_ddp.state_dict())
+    for i, (name, _) in enumerate(model_without_ddp.named_parameters()):
+        ema_state_dict[name] = model_without_ddp.ema_params1[i]
+    model_without_ddp.load_state_dict(ema_state_dict)
+
+    normalizer = None
+    normalizer_type = "none"
+    np_path = getattr(args, "pusht_normalizer_path", "") or ""
+    ds_path = getattr(args, "pusht_dataset_path", "") or ""
+    if np_path and os.path.exists(np_path):
+        with open(np_path, "rb") as f:
+            normalizer = pickle.load(f)
+        normalizer_type = "all"
+    elif ds_path and os.path.exists(ds_path):
+        from unified_video_action.dataset.pusht_image_dataset import PushTImageDataset
+        from unified_video_action.model.common.normalizer import LinearNormalizer
+        dataset = PushTImageDataset(dataset_path=ds_path, horizon=1, val_ratio=0)
+        normalizer = dataset.get_normalizer(mode="limits")
+        normalizer_type = "all"
+
+    policy = JitPushTPolicy(
+        denoiser=model_without_ddp,
+        n_action_steps=8,
+        max_condition_frames=getattr(args, "max_condition_frames", 2),
+        img_size=getattr(args, "img_size", 256),
+        action_dim=getattr(args, "action_dim", 2),
+        normalizer=normalizer,
+        normalizer_type=normalizer_type,
+        device=device,
+    )
+    policy.eval()
+
+    use_wandb_video = getattr(args, "pusht_wandb_video", False)
+    n_test_vis = 4 if use_wandb_video else 0
+    n_train_vis = 2 if use_wandb_video else 0
+
+    env_runner = PushTImageRunner(
+        output_dir=output_dir,
+        n_train=6,
+        n_train_vis=n_train_vis,
+        train_start_seed=0,
+        n_test=50,
+        n_test_vis=n_test_vis,
+        legacy_test=True,
+        test_start_seed=100000,
+        max_steps=300,
+        n_obs_steps=16,
+        n_action_steps=8,
+        fps=10,
+        render_size=96,
+        past_action=False,
+        fix_goal=True,
+    )
+
+    # Init wandb for video logging (like UVA)
+    if use_wandb_video:
+        try:
+            import wandb
+            if wandb.run is None:
+                wandb.init(
+                    project="jit-pusht",
+                    name=os.path.basename(getattr(args, "output_dir", "eval")),
+                    config={"epoch": epoch},
+                )
+        except ImportError:
+            use_wandb_video = False
+
+    print("Running PushT success rate evaluation...")
+    runner_log = env_runner.run(policy)
+    model_without_ddp.load_state_dict(model_state_dict)
+
+    test_mean = runner_log.get("test/mean_score")
+    train_mean = runner_log.get("train/mean_score")
+    print(f"PushT test mean score: {test_mean:.4f}, train mean score: {train_mean:.4f}")
+
+    if log_writer is not None and test_mean is not None:
+        log_writer.add_scalar("pusht_test_mean_score", float(test_mean), epoch)
+    if log_writer is not None and train_mean is not None:
+        log_writer.add_scalar("pusht_train_mean_score", float(train_mean), epoch)
+
+    if use_wandb_video:
+        try:
+            import wandb
+            wandb.log(runner_log, step=epoch)
+        except Exception:
+            pass
