@@ -125,6 +125,14 @@ def get_args_parser():
                         help='Path to pushT zarr for fitting normalizer (optional)')
     parser.add_argument('--pusht_wandb_video', action='store_true',
                         help='Log PushT rollout videos to wandb (like UVA)')
+
+    # wandb
+    parser.add_argument('--wandb', action='store_true',
+                        help='Enable wandb logging for training')
+    parser.add_argument('--wandb_project', type=str, default='jit-opt',
+                        help='Wandb project name')
+    parser.add_argument('--wandb_run_name', type=str, default=None,
+                        help='Wandb run name (default: output_dir basename)')
     
     # checkpointing
     parser.add_argument('--output_dir', default='./output_dir',
@@ -171,6 +179,23 @@ def main(args):
         log_writer = SummaryWriter(log_dir=args.output_dir)
     else:
         log_writer = None
+
+    # Init wandb (only on main process)
+    use_wandb = getattr(args, 'wandb', False) and global_rank == 0
+    if use_wandb:
+        try:
+            import wandb
+            wandb_run_name = getattr(args, 'wandb_run_name', None) or os.path.basename(args.output_dir.rstrip('/'))
+            wandb.init(
+                project=getattr(args, 'wandb_project', 'jit-opt'),
+                name=wandb_run_name,
+                config=vars(args),
+            )
+            print(f"Wandb initialized: project={args.wandb_project}, run={wandb_run_name}")
+        except ImportError:
+            use_wandb = False
+            print("wandb not installed, skipping wandb logging")
+    args._use_wandb = use_wandb
 
     # Data loading: 支持两种模式
     if args.use_condition_frames:

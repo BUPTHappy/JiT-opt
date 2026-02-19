@@ -102,6 +102,12 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
             if data_iter_step % args.log_freq == 0:
                 log_writer.add_scalar('train_loss', loss_value_reduce, epoch_1000x)
                 log_writer.add_scalar('lr', lr, epoch_1000x)
+                if getattr(args, '_use_wandb', False):
+                    try:
+                        import wandb
+                        wandb.log({'train_loss': loss_value_reduce, 'lr': lr}, step=epoch_1000x)
+                    except Exception:
+                        pass
 
 
 def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, data_loader_val=None):
@@ -250,6 +256,12 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
             print(f"Action Prediction MSE: {avg_action_mse:.6f}")
             if log_writer is not None:
                 log_writer.add_scalar('eval_action_mse', avg_action_mse, epoch)
+            if getattr(args, '_use_wandb', False):
+                try:
+                    import wandb
+                    wandb.log({'eval_action_mse': avg_action_mse}, step=epoch)
+                except Exception:
+                    pass
         
         torch.distributed.barrier()
         
@@ -273,6 +285,12 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
                 )
                 log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
                 print(f"FID (generated vs target): {fid:.4f}")
+                if getattr(args, '_use_wandb', False):
+                    try:
+                        import wandb
+                        wandb.log({'eval_fid': fid}, step=epoch)
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f"Error computing FID: {e}")
         
@@ -436,8 +454,8 @@ def run_pusht_success_eval(model_without_ddp, args, epoch, log_writer=None):
             import wandb
             if wandb.run is None:
                 wandb.init(
-                    project="jit-pusht",
-                    name=os.path.basename(getattr(args, "output_dir", "eval")),
+                    project=getattr(args, "wandb_project", "jit-pusht"),
+                    name=getattr(args, "wandb_run_name", None) or os.path.basename(getattr(args, "output_dir", "eval").rstrip("/")),
                     config={"epoch": epoch},
                 )
         except ImportError:
