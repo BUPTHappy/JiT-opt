@@ -319,7 +319,8 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 sampled_images = model_without_ddp.generate(labels=labels_gen)
 
-        torch.distributed.barrier() #等待所有进程到达这一点
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
         # denormalize images
         sampled_images = (sampled_images + 1) / 2
@@ -335,7 +336,8 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
             # 使用PIL保存图像（不需要OpenGL，适合无头服务器）
             Image.fromarray(gen_img).save(os.path.join(save_folder, '{}.png'.format(str(img_id).zfill(5))))
 
-    torch.distributed.barrier()
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
 
     # back to no ema
     print("Switch back from ema")
@@ -370,7 +372,8 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
         print("Skipping FID/IS calculation: torch_fidelity not available")
         shutil.rmtree(save_folder)
 
-    torch.distributed.barrier()
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
 
 
 def run_pusht_success_eval(model_without_ddp, args, epoch, log_writer=None):
