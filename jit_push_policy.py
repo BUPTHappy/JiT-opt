@@ -17,7 +17,7 @@ if os.path.exists(_UVA_ROOT) and _UVA_ROOT not in sys.path:
 
 from unified_video_action.policy.base_image_policy import BaseImagePolicy
 from unified_video_action.model.common.normalizer import LinearNormalizer
-from unified_video_action.common.normalize_util import unnormalize_future_action
+from unified_video_action.utils.data_utils import unnormalize_future_action
 
 
 class JitPushTPolicy(BaseImagePolicy):
