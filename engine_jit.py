@@ -263,7 +263,8 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
                 except Exception:
                     pass
         
-        torch.distributed.barrier()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
         
         # Compute FID between generated and target images
         if log_writer is not None and HAS_TORCH_FIDELITY and misc.get_rank() == 0:
