@@ -190,6 +190,7 @@ def main(args):
                 project=getattr(args, 'wandb_project', 'jit-opt'),
                 name=wandb_run_name,
                 config=vars(args),
+                mode="offline" if getattr(args, 'wandb_offline', False) else "online",
             )
             print(f"Wandb initialized: project={args.wandb_project}, run={wandb_run_name}")
         except ImportError:
