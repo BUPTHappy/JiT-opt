@@ -305,6 +305,7 @@ class JiT(nn.Module):
         # Compatible with different datasets: UMI (10-dim) and pushT (2-dim)
         self.action_dim = action_dim
         self.action_pooler = nn.AdaptiveAvgPool1d(1)  # Global average pooling over sequence dimension
+        self.action_norm = nn.LayerNorm(hidden_size)  # Normalize pooled features before MLP
         self.action_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
             nn.SiLU(),
@@ -438,11 +439,9 @@ class JiT(nn.Module):
         # Although input is noisy, transformer features contain denoising information
         action_pred = None
         if return_action:
-            # Extract action from target_frame features (x after removing condition tokens)
-            # x: (N, num_patches, hidden_size) - target_frame features after transformer
-            # Global average pooling over sequence dimension
             action_features = self.action_pooler(x.transpose(1, 2))  # (N, hidden_size, 1)
             action_features = action_features.squeeze(-1)  # (N, hidden_size)
+            action_features = self.action_norm(action_features)  # Normalize before MLP
             action_pred = self.action_head(action_features)  # (N, action_dim)
 
         x = self.final_layer(x, c)
