@@ -145,6 +145,20 @@ class Denoiser(nn.Module):
         if action_gt is not None:
             loss_action = torch.nn.functional.mse_loss(action_pred, action_gt)
         
+        # DEBUG: print loss components on first forward pass
+        if not hasattr(self, '_debug_printed'):
+            self._debug_printed = True
+            print(f"[DEBUG denoiser] freeze_backbone={self.freeze_backbone}, "
+                  f"action_only_loss={self.action_only_loss}")
+            print(f"[DEBUG denoiser] loss_image={loss_image}, loss_action={loss_action}")
+            if action_gt is not None:
+                print(f"[DEBUG denoiser] action_pred min={action_pred.min().item():.4f}, "
+                      f"max={action_pred.max().item():.4f}, "
+                      f"mean={action_pred.mean().item():.4f}")
+                print(f"[DEBUG denoiser] action_gt   min={action_gt.min().item():.4f}, "
+                      f"max={action_gt.max().item():.4f}, "
+                      f"mean={action_gt.mean().item():.4f}")
+
         # Combined loss
         if self.freeze_backbone or self.action_only_loss:
             # Only use action loss: freeze_backbone=只训action_head, action_only_loss=全模型微调
@@ -162,6 +176,11 @@ class Denoiser(nn.Module):
                 loss = loss_action
             else:
                 raise ValueError("No loss to compute: both image and action losses are None")
+
+        # DEBUG: print final loss on first forward
+        if not hasattr(self, '_debug_loss_printed'):
+            self._debug_loss_printed = True
+            print(f"[DEBUG denoiser] final loss={loss.item():.4f}")
 
         return loss
 
