@@ -53,6 +53,12 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
             if 'action' in batch and batch['action'] is not None:
                 action_gt = batch['action'].to(device, non_blocking=True)
             
+            # DEBUG: print action stats on first iteration of first epoch
+            if data_iter_step == 0 and epoch == 0 and action_gt is not None:
+                print(f"[DEBUG] action_gt shape={action_gt.shape}, "
+                      f"min={action_gt.min().item():.4f}, max={action_gt.max().item():.4f}, "
+                      f"mean={action_gt.mean().item():.4f}, std={action_gt.std().item():.4f}")
+            
             labels = None
         else:
             # ImageNet模式（兼容性）

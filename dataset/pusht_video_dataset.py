@@ -100,8 +100,15 @@ class PushTVideoDataset(Dataset):
                 self.index_pool.append((ep_idx, frame_idx))
 
         print(f"PushTVideoDataset ({split}): {len(self.index_pool)} samples from {len(episode_indices)} episodes")
-        if normalize_action:
-            print(f"  Action normalization: ON ([-1, 1])")
+        if normalize_action and self.action_stats is not None:
+            print(f"  [DEBUG] Action normalization: ON ([-1, 1])")
+            print(f"  [DEBUG] action_min={self.action_stats['min']}, action_max={self.action_stats['max']}")
+            # Verify with a sample
+            sample_raw = actions[0].astype(np.float32)
+            sample_norm = self._normalize_action(sample_raw.copy())
+            print(f"  [DEBUG] Sample action[0] raw={sample_raw}, normalized={sample_norm}")
+        else:
+            print(f"  [DEBUG] Action normalization: OFF")
 
     def __len__(self):
         return len(self.index_pool)
