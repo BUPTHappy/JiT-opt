@@ -23,6 +23,7 @@ class PushTVideoDataset(Dataset):
         split: str = "train",
         val_ratio: float = 0.02,
         seed: int = 42,
+        normalize_action: bool = True,
         **kwargs
     ):
         dataset_path = os.path.expanduser(dataset_path)
@@ -48,6 +49,7 @@ class PushTVideoDataset(Dataset):
         self.max_condition_frames = max_condition_frames
         self.image_size = image_size
         self.split = split
+        self.normalize_action = normalize_action
 
         zarr_store = zarr.open(zarr_path, mode="r")
         if "data" not in zarr_store or "img" not in zarr_store["data"]:
@@ -59,6 +61,18 @@ class PushTVideoDataset(Dataset):
 
         episode_starts = [0] + list(episode_ends[:-1])
         n_episodes = len(episode_ends)
+
+        # Compute action normalization stats from ALL data (before train/val split)
+        self.action_stats = None
+        if normalize_action:
+            all_actions = actions[:].astype(np.float32)
+            action_min = all_actions.min(axis=0)  # (action_dim,)
+            action_max = all_actions.max(axis=0)  # (action_dim,)
+            self.action_stats = {
+                'min': action_min,
+                'max': action_max,
+            }
+            print(f"PushT action stats: min={action_min}, max={action_max}")
 
         # Train/val split
         np.random.seed(seed)
@@ -86,9 +100,21 @@ class PushTVideoDataset(Dataset):
                 self.index_pool.append((ep_idx, frame_idx))
 
         print(f"PushTVideoDataset ({split}): {len(self.index_pool)} samples from {len(episode_indices)} episodes")
+        if normalize_action:
+            print(f"  Action normalization: ON ([-1, 1])")
 
     def __len__(self):
         return len(self.index_pool)
+
+    def _normalize_action(self, action):
+        """Normalize action from raw space to [-1, 1] using precomputed min/max."""
+        if self.action_stats is None:
+            return action
+        a_min = self.action_stats['min']
+        a_max = self.action_stats['max']
+        # raw -> [0, 1] -> [-1, 1]
+        action = (action - a_min) / (a_max - a_min + 1e-8) * 2.0 - 1.0
+        return action
 
     def __getitem__(self, idx):
         ep_idx, frame_idx = self.index_pool[idx]
@@ -102,6 +128,9 @@ class PushTVideoDataset(Dataset):
 
         target_frame = self.images[frame_idx]
         action = self.actions[frame_idx].astype(np.float32)
+
+        if self.normalize_action:
+            action = self._normalize_action(action)
 
         h, w = target_frame.shape[:2]
         condition_frames = torch.from_numpy(condition_frames).float()

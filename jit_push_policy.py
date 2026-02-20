@@ -35,6 +35,7 @@ class JitPushTPolicy(BaseImagePolicy):
         action_dim=2,
         normalizer=None,
         normalizer_type="all",
+        action_stats=None,
         device=None,
     ):
         super().__init__()
@@ -44,6 +45,7 @@ class JitPushTPolicy(BaseImagePolicy):
         self.img_size = img_size
         self.action_dim = action_dim
         self.normalizer_type = normalizer_type
+        self.action_stats = action_stats  # {'min': np.array, 'max': np.array} from PushTVideoDataset
 
         if normalizer is not None:
             self.normalizer = normalizer
@@ -101,8 +103,13 @@ class JitPushTPolicy(BaseImagePolicy):
                 return_action=True,
             )  # (B, action_dim)
 
-        # Unnormalize action
-        if self.normalizer_type == "all" and "action" in self.normalizer.params_dict:
+        # Denormalize action from [-1, 1] back to original space
+        if self.action_stats is not None:
+            # Use dataset-computed min/max stats (preferred, matches training normalization exactly)
+            a_min = torch.tensor(self.action_stats['min'], dtype=action_pred.dtype, device=device)
+            a_max = torch.tensor(self.action_stats['max'], dtype=action_pred.dtype, device=device)
+            action_pred = (action_pred + 1.0) / 2.0 * (a_max - a_min) + a_min
+        elif self.normalizer_type == "all" and "action" in self.normalizer.params_dict:
             action_pred = unnormalize_future_action(
                 normalizer=self.normalizer,
                 normalizer_type=self.normalizer_type,

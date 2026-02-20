@@ -280,6 +280,7 @@ class UmiVideoDataset(Dataset):
         # 数据集配置
         self.dataset_configs = dataset_configs or {}
         
+        self.action_stats = None  # UMI actions are already in a reasonable range, no normalization needed
         self.zarr_stores = []
         self.dataset_info = []  # 存储数据集信息
         self.index_pool = []  # (dataset_idx, episode_idx, frame_idx)

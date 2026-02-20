@@ -419,6 +419,8 @@ def run_pusht_success_eval(model_without_ddp, args, epoch, log_writer=None):
         normalizer = dataset.get_normalizer(mode="limits")
         normalizer_type = "all"
 
+    action_stats = getattr(args, '_action_stats', None)
+
     policy = JitPushTPolicy(
         denoiser=model_without_ddp,
         n_action_steps=8,
@@ -427,6 +429,7 @@ def run_pusht_success_eval(model_without_ddp, args, epoch, log_writer=None):
         action_dim=getattr(args, "action_dim", 2),
         normalizer=normalizer,
         normalizer_type=normalizer_type,
+        action_stats=action_stats,
         device=device,
     )
     policy.eval()

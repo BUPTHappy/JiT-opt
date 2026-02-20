@@ -150,18 +150,40 @@ def main():
 
     denoiser.net.load_state_dict(sd, strict=False)
 
-    # Normalizer
+    # Action stats for denormalization (preferred over UVA normalizer)
+    action_stats = None
     normalizer = None
     normalizer_type = "none"
-    if args.normalizer_path and os.path.exists(args.normalizer_path):
-        with open(args.normalizer_path, "rb") as f:
-            normalizer = pickle.load(f)
-        normalizer_type = "all"
-        print(f"Loaded normalizer from {args.normalizer_path}")
-    elif args.dataset_path and os.path.exists(args.dataset_path):
-        normalizer = load_normalizer_from_dataset(args.dataset_path)
-        normalizer_type = "all"
-        print(f"Fitted normalizer from dataset {args.dataset_path}")
+
+    if args.dataset_path and os.path.exists(args.dataset_path):
+        # Compute action stats directly from the zarr dataset (matches training normalization)
+        import zarr as _zarr
+        ds_path = args.dataset_path
+        if not ds_path.endswith('.zarr'):
+            candidates = [f for f in os.listdir(ds_path) if f.endswith('.zarr')]
+            if candidates:
+                ds_path = os.path.join(ds_path, candidates[0])
+        if os.path.exists(ds_path):
+            zs = _zarr.open(ds_path, mode='r')
+            if 'data' in zs and 'action' in zs['data']:
+                all_actions = zs['data']['action'][:].astype(np.float32)
+                action_stats = {
+                    'min': all_actions.min(axis=0),
+                    'max': all_actions.max(axis=0),
+                }
+                print(f"Computed action stats from dataset: min={action_stats['min']}, max={action_stats['max']}")
+
+    if action_stats is None:
+        # Fallback to UVA normalizer
+        if args.normalizer_path and os.path.exists(args.normalizer_path):
+            with open(args.normalizer_path, "rb") as f:
+                normalizer = pickle.load(f)
+            normalizer_type = "all"
+            print(f"Loaded normalizer from {args.normalizer_path}")
+        elif args.dataset_path and os.path.exists(args.dataset_path):
+            normalizer = load_normalizer_from_dataset(args.dataset_path)
+            normalizer_type = "all"
+            print(f"Fitted normalizer from dataset {args.dataset_path}")
 
     policy = JitPushTPolicy(
         denoiser=denoiser,
@@ -171,6 +193,7 @@ def main():
         action_dim=args.action_dim,
         normalizer=normalizer,
         normalizer_type=normalizer_type,
+        action_stats=action_stats,
         device=device,
     )
     policy.eval()

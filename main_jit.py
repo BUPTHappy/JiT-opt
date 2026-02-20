@@ -229,6 +229,8 @@ def main(args):
                 used_episode_indices_file=args.used_episode_indices_file if args.used_episode_indices_file else None
             )
         print(f"Video dataset ({dataset_type}): {len(dataset_train)} samples")
+        # Store action normalization stats for eval denormalization
+        args._action_stats = getattr(dataset_train, 'action_stats', None)
     else:
         # ImageNet模式（兼容性）
         transform_train = transforms.Compose([
