@@ -14,11 +14,13 @@ import json
 import torch
 import numpy as np
 
-# Add paths for imports
+# Add paths for imports (append UVA to avoid overriding JiT's util.misc)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, SCRIPT_DIR)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 UVA_ROOT = os.path.join(SCRIPT_DIR, "..", "unified_video_action")
-sys.path.insert(0, UVA_ROOT)
+if UVA_ROOT not in sys.path:
+    sys.path.append(UVA_ROOT)
 
 from denoiser import Denoiser
 from jit_push_policy import JitPushTPolicy
@@ -33,7 +35,7 @@ def get_args():
 
     # Model args (must match training)
     parser.add_argument("--model", type=str, default="JiT-B/16")
-    parser.add_argument("--img_size", type=int, default=256)
+    parser.add_argument("--img_size", type=int, default=96, help="Image size (96 for PushT)")
     parser.add_argument("--max_condition_frames", type=int, default=2)
     parser.add_argument("--action_dim", type=int, default=2, help="PushT action dim = 2")
 
@@ -41,7 +43,9 @@ def get_args():
     parser.add_argument("--normalizer_path", type=str, default=None,
                         help="Path to normalizer.pkl (from UVA pushT training). If None, uses default [-1,1]->[0,512]")
     parser.add_argument("--dataset_path", type=str, default=None,
-                        help="Path to pushT zarr dataset. If provided with --normalizer_path=None, fits normalizer from data")
+                        help="Path to pushT zarr dataset or parent dir. Used to compute action denormalization stats")
+    parser.add_argument("--dataset_names", type=str, default="pusht_cchi_v7_replay",
+                        help="Name of zarr dataset (used with --dataset_path if it's a parent dir)")
 
     # Wandb (like UVA)
     parser.add_argument("--wandb", action="store_true",
@@ -133,36 +137,50 @@ def main():
 
     # Load checkpoint
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    if "model" in ckpt:
-        sd = ckpt["model"]
-    else:
-        sd = ckpt
 
     if args.use_ema and "model_ema1" in ckpt:
         sd = ckpt["model_ema1"]
-        if any(k.startswith("net.") for k in sd.keys()):
-            sd = {k.replace("net.", ""): v for k, v in sd.items()}
-        print("Loaded EMA model")
+        print("Using EMA model weights")
+    elif "model" in ckpt:
+        sd = ckpt["model"]
+        print("Using regular model weights")
     else:
-        if any(k.startswith("net.") for k in sd.keys()):
-            sd = {k.replace("net.", ""): v for k, v in sd.items()}
-        print("Loaded regular model")
+        sd = ckpt
+        print("Using raw checkpoint dict")
 
-    denoiser.net.load_state_dict(sd, strict=False)
+    # The checkpoint saves Denoiser state dict (keys start with 'net.').
+    # Load into the full Denoiser, which handles both net.* and other keys.
+    missing, unexpected = denoiser.load_state_dict(sd, strict=False)
+    if missing:
+        print(f"Missing keys: {missing[:5]}{'...' if len(missing) > 5 else ''}")
+    if unexpected:
+        print(f"Unexpected keys: {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
+    print(f"Checkpoint loaded from {args.checkpoint}")
 
-    # Action stats for denormalization (preferred over UVA normalizer)
+    # Action stats for denormalization (matches training normalization exactly)
     action_stats = None
     normalizer = None
     normalizer_type = "none"
 
-    if args.dataset_path and os.path.exists(args.dataset_path):
-        # Compute action stats directly from the zarr dataset (matches training normalization)
+    # Try to load action stats from checkpoint (saved via args)
+    if "args" in ckpt and hasattr(ckpt["args"], "_action_stats") and ckpt["args"]._action_stats is not None:
+        action_stats = ckpt["args"]._action_stats
+        print(f"Loaded action stats from checkpoint: min={action_stats['min']}, max={action_stats['max']}")
+
+    # If not in checkpoint, compute from dataset
+    if action_stats is None and args.dataset_path and os.path.exists(args.dataset_path):
         import zarr as _zarr
         ds_path = args.dataset_path
+        # Resolve: parent_dir + dataset_name.zarr
         if not ds_path.endswith('.zarr'):
-            candidates = [f for f in os.listdir(ds_path) if f.endswith('.zarr')]
-            if candidates:
-                ds_path = os.path.join(ds_path, candidates[0])
+            name = args.dataset_names.split(',')[0].strip()
+            candidate = os.path.join(ds_path, name + '.zarr')
+            if os.path.exists(candidate):
+                ds_path = candidate
+            else:
+                candidates = [f for f in os.listdir(ds_path) if f.endswith('.zarr')]
+                if candidates:
+                    ds_path = os.path.join(ds_path, candidates[0])
         if os.path.exists(ds_path):
             zs = _zarr.open(ds_path, mode='r')
             if 'data' in zs and 'action' in zs['data']:
@@ -174,16 +192,13 @@ def main():
                 print(f"Computed action stats from dataset: min={action_stats['min']}, max={action_stats['max']}")
 
     if action_stats is None:
-        # Fallback to UVA normalizer
         if args.normalizer_path and os.path.exists(args.normalizer_path):
             with open(args.normalizer_path, "rb") as f:
                 normalizer = pickle.load(f)
             normalizer_type = "all"
             print(f"Loaded normalizer from {args.normalizer_path}")
-        elif args.dataset_path and os.path.exists(args.dataset_path):
-            normalizer = load_normalizer_from_dataset(args.dataset_path)
-            normalizer_type = "all"
-            print(f"Fitted normalizer from dataset {args.dataset_path}")
+        else:
+            print("WARNING: No action stats or normalizer found! Using fallback [-1,1]->[0,512] scaling.")
 
     policy = JitPushTPolicy(
         denoiser=denoiser,
