@@ -52,7 +52,7 @@ class JitPushTPolicy(BaseImagePolicy):
         else:
             self.normalizer = LinearNormalizer()
 
-        self.device = device or next(denoiser.parameters()).device
+        self._device = device or next(denoiser.parameters()).device
 
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
@@ -62,7 +62,7 @@ class JitPushTPolicy(BaseImagePolicy):
         obs_dict: image (B, T, 3, 96, 96), agent_pos (B, T, 2)
         return: {"action": (B, n_action_steps, 2)}
         """
-        device = self.device
+        device = self._device
         image = obs_dict["image"].to(device)  # (B, T, 3, 96, 96)
 
         B, T, C, H, W = image.shape
