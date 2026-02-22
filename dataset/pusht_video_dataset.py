@@ -24,6 +24,7 @@ class PushTVideoDataset(Dataset):
         val_ratio: float = 0.02,
         seed: int = 42,
         normalize_action: bool = True,
+        action_horizon: int = 1,
         **kwargs
     ):
         dataset_path = os.path.expanduser(dataset_path)
@@ -50,6 +51,7 @@ class PushTVideoDataset(Dataset):
         self.image_size = image_size
         self.split = split
         self.normalize_action = normalize_action
+        self.action_horizon = action_horizon
 
         zarr_store = zarr.open(zarr_path, mode="r")
         if "data" not in zarr_store or "img" not in zarr_store["data"]:
@@ -96,19 +98,14 @@ class PushTVideoDataset(Dataset):
         for ep_idx in episode_indices:
             start = episode_starts[ep_idx]
             end = episode_ends[ep_idx]
-            for frame_idx in range(start + max_condition_frames, end):
+            # Need action_horizon future steps available after frame_idx
+            for frame_idx in range(start + max_condition_frames, end - action_horizon + 1):
                 self.index_pool.append((ep_idx, frame_idx))
 
         print(f"PushTVideoDataset ({split}): {len(self.index_pool)} samples from {len(episode_indices)} episodes")
+        print(f"  action_horizon={action_horizon}, normalize_action={normalize_action}")
         if normalize_action and self.action_stats is not None:
-            print(f"  [DEBUG] Action normalization: ON ([-1, 1])")
-            print(f"  [DEBUG] action_min={self.action_stats['min']}, action_max={self.action_stats['max']}")
-            # Verify with a sample
-            sample_raw = actions[0].astype(np.float32)
-            sample_norm = self._normalize_action(sample_raw.copy())
-            print(f"  [DEBUG] Sample action[0] raw={sample_raw}, normalized={sample_norm}")
-        else:
-            print(f"  [DEBUG] Action normalization: OFF")
+            print(f"  action_min={self.action_stats['min']}, action_max={self.action_stats['max']}")
 
     def __len__(self):
         return len(self.index_pool)
@@ -134,10 +131,13 @@ class PushTVideoDataset(Dataset):
         condition_frames = np.stack(condition_frames)
 
         target_frame = self.images[frame_idx]
-        action = self.actions[frame_idx].astype(np.float32)
 
+        # Multi-step action: [frame_idx, frame_idx+1, ..., frame_idx+action_horizon-1]
+        action_seq = self.actions[frame_idx : frame_idx + self.action_horizon].astype(np.float32)
         if self.normalize_action:
-            action = self._normalize_action(action)
+            action_seq = self._normalize_action(action_seq)
+        # Flatten: (action_horizon, action_dim) -> (action_horizon * action_dim,)
+        action = action_seq.reshape(-1)
 
         h, w = target_frame.shape[:2]
         condition_frames = torch.from_numpy(condition_frames).float()

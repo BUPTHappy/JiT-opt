@@ -232,7 +232,8 @@ class JiT(nn.Module):
         max_condition_frames=2, # 窗口条件帧数
         text_latent_dim=512, # 文本特征维度
         use_text_condition=False,
-        action_dim=10  # Action dimension (default 10 for UMI, 2 for pushT)
+        action_dim=10,  # Action dimension per step (default 10 for UMI, 2 for pushT)
+        action_horizon=1  # Number of future action steps to predict
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -303,7 +304,10 @@ class JiT(nn.Module):
 
         # action prediction head (for video-to-action task)
         # Compatible with different datasets: UMI (10-dim) and pushT (2-dim)
+        # Supports multi-step prediction: outputs action_dim * action_horizon values
         self.action_dim = action_dim
+        self.action_horizon = action_horizon
+        action_output_dim = action_dim * action_horizon
         self.action_pooler = nn.AdaptiveAvgPool1d(1)  # Global average pooling over sequence dimension
         self.action_norm = nn.LayerNorm(hidden_size)  # Normalize pooled features before MLP
         self.action_head = nn.Sequential(
@@ -311,7 +315,7 @@ class JiT(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_size // 2, hidden_size // 4),
             nn.SiLU(),
-            nn.Linear(hidden_size // 4, action_dim)  # Configurable action dimension
+            nn.Linear(hidden_size // 4, action_output_dim)
         )
 
         self.initialize_weights()
@@ -442,7 +446,7 @@ class JiT(nn.Module):
             action_features = self.action_pooler(x.transpose(1, 2))  # (N, hidden_size, 1)
             action_features = action_features.squeeze(-1)  # (N, hidden_size)
             action_features = self.action_norm(action_features)  # Normalize before MLP
-            action_pred = self.action_head(action_features)  # (N, action_dim)
+            action_pred = self.action_head(action_features)  # (N, action_dim * action_horizon)
 
         x = self.final_layer(x, c)
         output = self.unpatchify(x, self.patch_size)

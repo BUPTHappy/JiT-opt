@@ -116,7 +116,9 @@ def get_args_parser():
     parser.add_argument('--used_episode_indices_file', type=str, default='',
                         help='JSON file specifying which episodes to use (optional)')
     parser.add_argument('--action_dim', type=int, default=10,
-                        help='Action dimension (default 10 for UMI, 2 for pushT)')
+                        help='Action dimension per step (default 10 for UMI, 2 for pushT)')
+    parser.add_argument('--action_horizon', type=int, default=1,
+                        help='Number of future action steps to predict (1=single-step, 8=multi-step)')
     parser.add_argument('--eval_pusht_success', action='store_true',
                         help='When action_dim=2, run pushT env evaluation for success rate (requires UVA)')
     parser.add_argument('--pusht_normalizer_path', type=str, default='',
@@ -216,6 +218,7 @@ def main(args):
                 max_condition_frames=args.max_condition_frames,
                 image_size=args.img_size,
                 split='train',
+                action_horizon=getattr(args, 'action_horizon', 1),
             )
         else:
             from dataset.umi_video_dataset import UmiVideoDataset
@@ -271,6 +274,7 @@ def main(args):
                 max_condition_frames=args.max_condition_frames,
                 image_size=args.img_size,
                 split='val',
+                action_horizon=getattr(args, 'action_horizon', 1),
             )
         else:
             dataset_names = [name.strip() for name in args.dataset_names.split(',') if name.strip()]
@@ -350,14 +354,12 @@ def main(args):
         missing_keys, unexpected_keys = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
         if missing_keys:
             print(f"Note: Missing keys (newly added parameters): {missing_keys[:5]}...")
-            # Check if action_head needs reinitialization due to action_dim mismatch
             if any('action_head' in key for key in missing_keys):
-                print(f"Note: action_head will be reinitialized (action_dim={getattr(args, 'action_dim', 10)})")
+                print(f"Note: action_head will be reinitialized (action_dim={getattr(args, 'action_dim', 10)}, action_horizon={getattr(args, 'action_horizon', 1)})")
         if unexpected_keys:
             print(f"Note: Unexpected keys (ignored): {unexpected_keys[:5]}...")
-            # Check if old action_head is being ignored due to action_dim mismatch
             if any('action_head' in key for key in unexpected_keys):
-                print(f"Note: Old action_head ignored (action_dim mismatch, new action_dim={getattr(args, 'action_dim', 10)})")
+                print(f"Note: Old action_head ignored (shape mismatch, new action_dim={getattr(args, 'action_dim', 10)}, action_horizon={getattr(args, 'action_horizon', 1)})")
 
         # Load EMA parameters (only for existing parameters)
         ema_state_dict1 = checkpoint['model_ema1']

@@ -38,6 +38,8 @@ def get_args():
     parser.add_argument("--img_size", type=int, default=96, help="Image size (96 for PushT)")
     parser.add_argument("--max_condition_frames", type=int, default=2)
     parser.add_argument("--action_dim", type=int, default=2, help="PushT action dim = 2")
+    parser.add_argument("--action_horizon", type=int, default=None,
+                        help="Number of future action steps (auto-detected from checkpoint if None)")
 
     # Normalizer
     parser.add_argument("--normalizer_path", type=str, default=None,
@@ -104,6 +106,17 @@ def main():
         run_name = args.wandb_run_name or os.path.splitext(os.path.basename(args.checkpoint))[0]
         wandb.init(project=args.wandb_project, name=run_name, config=vars(args))
 
+    # Auto-detect action_horizon from checkpoint args
+    ckpt_preview = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    action_horizon = args.action_horizon
+    if action_horizon is None:
+        if "args" in ckpt_preview and hasattr(ckpt_preview["args"], "action_horizon"):
+            action_horizon = ckpt_preview["args"].action_horizon
+            print(f"Auto-detected action_horizon={action_horizon} from checkpoint")
+        else:
+            action_horizon = 1
+            print(f"action_horizon not found in checkpoint, defaulting to 1")
+
     # Build model args for Denoiser
     model_args = argparse.Namespace(
         model=args.model,
@@ -112,6 +125,7 @@ def main():
         text_latent_dim=512,
         use_text_condition=False,
         action_dim=args.action_dim,
+        action_horizon=action_horizon,
         class_num=1000,
         attn_dropout=0.0,
         proj_dropout=0.0,
@@ -135,8 +149,8 @@ def main():
     denoiser.to(device)
     denoiser.eval()
 
-    # Load checkpoint
-    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    # Use the already-loaded checkpoint (move to device if needed)
+    ckpt = ckpt_preview
 
     if args.use_ema and "model_ema1" in ckpt:
         sd = ckpt["model_ema1"]

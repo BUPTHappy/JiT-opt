@@ -33,6 +33,7 @@ class JitPushTPolicy(BaseImagePolicy):
         max_condition_frames=2,
         img_size=256,
         action_dim=2,
+        action_horizon=None,
         normalizer=None,
         normalizer_type="all",
         action_stats=None,
@@ -44,8 +45,12 @@ class JitPushTPolicy(BaseImagePolicy):
         self.max_condition_frames = max_condition_frames
         self.img_size = img_size
         self.action_dim = action_dim
+        # Auto-detect action_horizon from model if not provided
+        if action_horizon is None:
+            action_horizon = getattr(denoiser.net, 'action_horizon', 1)
+        self.action_horizon = action_horizon
         self.normalizer_type = normalizer_type
-        self.action_stats = action_stats  # {'min': np.array, 'max': np.array} from PushTVideoDataset
+        self.action_stats = action_stats
 
         if normalizer is not None:
             self.normalizer = normalizer
@@ -96,31 +101,38 @@ class JitPushTPolicy(BaseImagePolicy):
         # Get action prediction from JiT
         with torch.no_grad():
             t = torch.ones(B, device=device)  # t=1 means clean frame (no noise)
-            _, action_pred = self.denoiser.net(
+            _, action_pred_flat = self.denoiser.net(
                 target_frame,
                 t,
                 condition_frames=condition_frames,
                 return_action=True,
-            )  # (B, action_dim)
+            )  # (B, action_dim * action_horizon)
 
-        # Denormalize action from [-1, 1] back to original space
+        # Reshape to (B, action_horizon, action_dim)
+        action_pred = action_pred_flat.reshape(B, self.action_horizon, self.action_dim)
+
+        # Denormalize each step from [-1, 1] back to original space
         if self.action_stats is not None:
-            # Use dataset-computed min/max stats (preferred, matches training normalization exactly)
             a_min = torch.tensor(self.action_stats['min'], dtype=action_pred.dtype, device=device)
             a_max = torch.tensor(self.action_stats['max'], dtype=action_pred.dtype, device=device)
             action_pred = (action_pred + 1.0) / 2.0 * (a_max - a_min) + a_min
         elif self.normalizer_type == "all" and "action" in self.normalizer.params_dict:
+            orig_shape = action_pred.shape
             action_pred = unnormalize_future_action(
                 normalizer=self.normalizer,
                 normalizer_type=self.normalizer_type,
-                actions=action_pred,
-            )
+                actions=action_pred.reshape(B, -1),
+            ).reshape(orig_shape)
         else:
-            # Fallback: assume model outputs [-1, 1], scale to pushT action space [0, 512]
-            action_pred = (action_pred + 1) * 256  # [-1,1] -> [0, 512]
+            action_pred = (action_pred + 1) * 256
             action_pred = torch.clamp(action_pred, 0, 512)
 
-        # Chunk: repeat single action for n_action_steps
-        action_pred = action_pred.unsqueeze(1).expand(-1, self.n_action_steps, -1)  # (B, 8, 2)
+        # Pad or truncate to n_action_steps
+        if self.action_horizon >= self.n_action_steps:
+            action_pred = action_pred[:, :self.n_action_steps]
+        else:
+            # Repeat last action to fill remaining steps
+            pad = action_pred[:, -1:].expand(-1, self.n_action_steps - self.action_horizon, -1)
+            action_pred = torch.cat([action_pred, pad], dim=1)
 
         return {"action": action_pred}

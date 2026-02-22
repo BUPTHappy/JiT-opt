@@ -14,6 +14,7 @@ class Denoiser(nn.Module):
         text_latent_dim = getattr(args, 'text_latent_dim', 512)
         use_text_condition = getattr(args, 'use_text_condition', False)
         action_dim = getattr(args, 'action_dim', 10)  # Default 10 for UMI, can be set to 2 for pushT
+        action_horizon = getattr(args, 'action_horizon', 1)  # Number of future action steps
 
         self.net = JiT_models[args.model](  #通过args.model选择模型架构
             input_size=args.img_size,
@@ -25,6 +26,7 @@ class Denoiser(nn.Module):
             text_latent_dim=text_latent_dim,
             use_text_condition=use_text_condition,
             action_dim=action_dim,
+            action_horizon=action_horizon,
         )
         self.img_size = args.img_size
         self.num_classes = args.class_num
