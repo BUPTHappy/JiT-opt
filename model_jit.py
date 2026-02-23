@@ -302,21 +302,34 @@ class JiT(nn.Module):
         # linear predict
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
 
-        # action prediction head (for video-to-action task)
-        # Compatible with different datasets: UMI (10-dim) and pushT (2-dim)
-        # Supports multi-step prediction: outputs action_dim * action_horizon values
+        # action prediction
         self.action_dim = action_dim
         self.action_horizon = action_horizon
-        action_output_dim = action_dim * action_horizon
-        self.action_pooler = nn.AdaptiveAvgPool1d(1)  # Global average pooling over sequence dimension
-        self.action_norm = nn.LayerNorm(hidden_size)  # Normalize pooled features before MLP
-        self.action_head = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.SiLU(),
-            nn.Linear(hidden_size // 2, hidden_size // 4),
-            nn.SiLU(),
-            nn.Linear(hidden_size // 4, action_output_dim)
-        )
+
+        if action_horizon > 1:
+            # Action Query Tokens: learnable queries that participate in self-attention
+            self.action_queries = nn.Parameter(torch.randn(1, action_horizon, hidden_size) * 0.02)
+            self.action_temporal_embed = nn.Parameter(torch.randn(1, action_horizon, hidden_size) * 0.02)
+            self.action_proj = nn.Linear(hidden_size, action_dim)
+            # RoPE variant that treats condition + action tokens as cls (no spatial rotation)
+            total_cls_with_action = total_incontext_tokens + action_horizon
+            self.feat_rope_with_action = VisionRotaryEmbeddingFast(
+                dim=half_head_dim,
+                pt_seq_len=hw_seq_len,
+                num_cls_token=total_cls_with_action
+            )
+        else:
+            # Single-step: pool + MLP (backward compatible with UMI)
+            action_output_dim = action_dim * action_horizon
+            self.action_pooler = nn.AdaptiveAvgPool1d(1)
+            self.action_norm = nn.LayerNorm(hidden_size)
+            self.action_head = nn.Sequential(
+                nn.Linear(hidden_size, hidden_size // 2),
+                nn.SiLU(),
+                nn.Linear(hidden_size // 2, hidden_size // 4),
+                nn.SiLU(),
+                nn.Linear(hidden_size // 4, action_output_dim)
+            )
 
         self.initialize_weights()
 
@@ -357,6 +370,13 @@ class JiT(nn.Module):
 
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
+
+        # Initialize action query tokens (if multi-step)
+        if self.action_horizon > 1:
+            nn.init.normal_(self.action_queries, std=0.02)
+            nn.init.normal_(self.action_temporal_embed, std=0.02)
+            nn.init.xavier_uniform_(self.action_proj.weight)
+            nn.init.constant_(self.action_proj.bias, 0)
 
     def unpatchify(self, x, p):
         """
@@ -410,12 +430,19 @@ class JiT(nn.Module):
             condition_tokens = torch.cat(condition_tokens_list, dim=1)
             condition_len = condition_tokens.shape[1]
 
-        # 跟踪是否实际添加了in_context tokens
+        # Track whether action query tokens were inserted
         added_in_context_tokens = False
+        action_tokens_inserted = False
+        use_action_queries = return_action and self.action_horizon > 1
         
         for i, block in enumerate(self.blocks):
             if condition_tokens is not None and i == self.in_context_start:
                 x = torch.cat([condition_tokens, x], dim=1)
+                # Insert action query tokens alongside condition tokens
+                if use_action_queries:
+                    aq = (self.action_queries + self.action_temporal_embed).expand(x.shape[0], -1, -1)
+                    x = torch.cat([x[:, :condition_len], aq, x[:, condition_len:]], dim=1)
+                    action_tokens_inserted = True
             elif self.in_context_len > 0 and i == self.in_context_start and y is not None:
                 y_emb = self.y_embedder(y)
                 in_context_tokens = y_emb.unsqueeze(1).repeat(1, self.in_context_len, 1)
@@ -423,7 +450,10 @@ class JiT(nn.Module):
                 x = torch.cat([in_context_tokens, x], dim=1)
                 added_in_context_tokens = True
             
-            if condition_tokens is not None and i >= self.in_context_start:
+            # Select RoPE based on which tokens are present
+            if action_tokens_inserted and i >= self.in_context_start:
+                rope = self.feat_rope_with_action
+            elif condition_tokens is not None and i >= self.in_context_start:
                 rope = self.feat_rope_incontext
             elif self.in_context_len > 0 and i >= self.in_context_start:
                 rope = self.feat_rope_incontext
@@ -432,21 +462,25 @@ class JiT(nn.Module):
             
             x = block(x, c, rope)
 
-        # 只移除实际添加的tokens
+        # Strip prefix tokens, extract action predictions
         if condition_tokens is not None:
             x = x[:, condition_len:]
         elif added_in_context_tokens:
             x = x[:, self.in_context_len:]
         
-        # Extract action features from target_frame (current frame) features
-        # This is more aligned: action_gt corresponds to target_frame moment
-        # Although input is noisy, transformer features contain denoising information
         action_pred = None
-        if return_action:
+        if action_tokens_inserted:
+            # Action query tokens path: extract action token outputs, project to action_dim
+            action_out = x[:, :self.action_horizon]             # (N, action_horizon, hidden_size)
+            x = x[:, self.action_horizon:]                       # restore target patches only
+            action_pred = self.action_proj(action_out)           # (N, action_horizon, action_dim)
+            action_pred = action_pred.reshape(x.shape[0], -1)   # (N, action_horizon * action_dim)
+        elif return_action:
+            # Single-step MLP path (action_horizon=1, backward compatible)
             action_features = self.action_pooler(x.transpose(1, 2))  # (N, hidden_size, 1)
-            action_features = action_features.squeeze(-1)  # (N, hidden_size)
-            action_features = self.action_norm(action_features)  # Normalize before MLP
-            action_pred = self.action_head(action_features)  # (N, action_dim * action_horizon)
+            action_features = action_features.squeeze(-1)             # (N, hidden_size)
+            action_features = self.action_norm(action_features)
+            action_pred = self.action_head(action_features)           # (N, action_dim)
 
         x = self.final_layer(x, c)
         output = self.unpatchify(x, self.patch_size)
