@@ -310,6 +310,7 @@ class JiT(nn.Module):
             # Action Query Tokens: learnable queries that participate in self-attention
             self.action_queries = nn.Parameter(torch.randn(1, action_horizon, hidden_size) * 0.02)
             self.action_temporal_embed = nn.Parameter(torch.randn(1, action_horizon, hidden_size) * 0.02)
+            self.action_norm = nn.LayerNorm(hidden_size)
             self.action_proj = nn.Linear(hidden_size, action_dim)
             # RoPE variant that treats condition + action tokens as cls (no spatial rotation)
             total_cls_with_action = total_incontext_tokens + action_horizon
@@ -470,9 +471,10 @@ class JiT(nn.Module):
         
         action_pred = None
         if action_tokens_inserted:
-            # Action query tokens path: extract action token outputs, project to action_dim
+            # Action query tokens path: extract action token outputs, normalize, project
             action_out = x[:, :self.action_horizon]             # (N, action_horizon, hidden_size)
             x = x[:, self.action_horizon:]                       # restore target patches only
+            action_out = self.action_norm(action_out)            # stabilize feature magnitudes
             action_pred = self.action_proj(action_out)           # (N, action_horizon, action_dim)
             action_pred = action_pred.reshape(x.shape[0], -1)   # (N, action_horizon * action_dim)
         elif return_action:
