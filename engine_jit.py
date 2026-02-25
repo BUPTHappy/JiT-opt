@@ -166,6 +166,8 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
         # 视频帧生成模式：从验证集获取条件帧和目标帧
         if data_loader_val is None:
             print("Warning: Validation dataloader not provided, skipping evaluation")
+            print("Switch back from ema")
+            model_without_ddp.load_state_dict(model_state_dict) #从ema切换回原始模型
             return
         
         print("Generating video frames from validation set...")
@@ -306,7 +308,9 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
             if not (HAS_TORCH_FIDELITY and log_writer is not None):
                 # Only clean up if we're not using the images for FID
                 shutil.rmtree(save_folder)
-        
+
+        print("Switch back from ema")
+        model_without_ddp.load_state_dict(model_state_dict) #从ema切换回原始模型
         return
     else:
         # ImageNet label生成模式（兼容性）
