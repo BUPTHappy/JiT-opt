@@ -119,6 +119,8 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
 def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, data_loader_val=None):
 
     model_without_ddp.eval()
+    # Keep wandb step scale consistent with train_one_epoch (epoch_1000x).
+    wandb_step = int((epoch + 1) * 1000)
     world_size = misc.get_world_size()
     local_rank = misc.get_rank()
     device = torch.device(f'cuda:{local_rank}')
@@ -267,7 +269,7 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
             if getattr(args, '_use_wandb', False):
                 try:
                     import wandb
-                    wandb.log({'eval_action_mse': avg_action_mse}, step=epoch)
+                    wandb.log({'eval_action_mse': avg_action_mse}, step=wandb_step)
                 except Exception:
                     pass
         
@@ -297,7 +299,7 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
                 if getattr(args, '_use_wandb', False):
                     try:
                         import wandb
-                        wandb.log({'eval_fid': fid}, step=epoch)
+                        wandb.log({'eval_fid': fid}, step=wandb_step)
                     except Exception:
                         pass
             except Exception as e:
@@ -388,6 +390,9 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
 
 
 def run_pusht_success_eval(model_without_ddp, args, epoch, log_writer=None):
+    # Keep wandb step scale consistent with train_one_epoch (epoch_1000x).
+    wandb_step = int((epoch + 1) * 1000)
+
     """
     Run PushT environment evaluation for success rate.
     Uses JitPushTPolicy and PushTImageRunner from UVA.
@@ -502,13 +507,13 @@ def run_pusht_success_eval(model_without_ddp, args, epoch, log_writer=None):
             if train_mean is not None:
                 metric_payload["pusht_train_mean_score"] = float(train_mean)
             if metric_payload:
-                wandb.log(metric_payload, step=epoch)
+                wandb.log(metric_payload, step=wandb_step)
         except Exception:
             pass
 
     if use_wandb_video:
         try:
             import wandb
-            wandb.log(runner_log, step=epoch)
+            wandb.log(runner_log, step=wandb_step)
         except Exception:
             pass
