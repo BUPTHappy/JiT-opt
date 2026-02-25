@@ -488,6 +488,20 @@ def run_pusht_success_eval(model_without_ddp, args, epoch, log_writer=None):
     if log_writer is not None and train_mean is not None:
         log_writer.add_scalar("pusht_train_mean_score", float(train_mean), epoch)
 
+    # Always log PushT success scalars to wandb when wandb training logging is enabled.
+    if getattr(args, "_use_wandb", False):
+        try:
+            import wandb
+            metric_payload = {}
+            if test_mean is not None:
+                metric_payload["pusht_test_mean_score"] = float(test_mean)
+            if train_mean is not None:
+                metric_payload["pusht_train_mean_score"] = float(train_mean)
+            if metric_payload:
+                wandb.log(metric_payload, step=epoch)
+        except Exception:
+            pass
+
     if use_wandb_video:
         try:
             import wandb

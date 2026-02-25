@@ -102,16 +102,9 @@ class Denoiser(nn.Module):
             else:
                 text_latents_dropped = text_latents
         
-        # handle condition_frames (for CFG training)
-        # 注意：condition_frames的dropout需要在batch级别处理
-        # 为了简化，在训练时随机将整个batch的condition_frames设置为None
-        # 这样模型会学习：50%的时间有条件，50%的时间无条件
-        # 但是，如果freeze_backbone=True或action_only_loss=True（只训练/微调action），我们不应该drop condition_frames
-        # 因为action需要从condition_frames中提取
         condition_frames_dropped = condition_frames
         if condition_frames is not None and self.training and not self.freeze_backbone and not self.action_only_loss:
-            # 随机drop整个batch的condition_frames（用于CFG训练）
-            # 但是当freeze_backbone=True时，不drop，因为需要condition_frames来提取action
+            
             if torch.rand(1, device=condition_frames.device).item() < self.condition_drop_prob:
                 condition_frames_dropped = None
 

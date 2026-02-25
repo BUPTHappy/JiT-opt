@@ -141,6 +141,8 @@ def get_args_parser():
                         help='Directory to save outputs (empty for no saving)')
     parser.add_argument('--resume', default='',
                         help='Folder that contains checkpoint to resume from')
+    parser.add_argument('--reset_epoch_on_resume', action='store_true',
+                        help='When resuming, load model weights but reset start_epoch to 0')
     parser.add_argument('--save_last_freq', type=int, default=5,
                         help='Frequency (in epochs) to save checkpoints')
     parser.add_argument('--log_freq', default=100, type=int)
@@ -384,8 +386,10 @@ def main(args):
         # Store checkpoint info for later optimizer loading
         checkpoint_epoch = checkpoint.get('epoch', 0)
         checkpoint_optimizer = checkpoint.get('optimizer', None)
-        # When fine-tuning with different loss (action_only_loss), reset epoch to 0
-        if getattr(args, 'action_only_loss', False) or getattr(args, 'freeze_backbone', False):
+        # Reset epoch counter for fine-tuning or explicit reset request.
+        if (getattr(args, 'action_only_loss', False)
+                or getattr(args, 'freeze_backbone', False)
+                or getattr(args, 'reset_epoch_on_resume', False)):
             args.start_epoch = 0
             print(f"Fine-tuning mode: resetting start_epoch to 0 (checkpoint was at epoch {checkpoint_epoch})")
         else:
