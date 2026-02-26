@@ -124,32 +124,34 @@ class Denoiser(nn.Module):
             action_noisy = action_t * action_gt + (1 - action_t) * action_e
             action_v = (action_gt - action_noisy) / (1 - action_t).clamp_min(self.t_eps)
 
-        # Forward pass with optional action prediction
-        return_action = (action_gt is not None)
-        net_output = self.net(z, t.flatten(), y=labels_dropped, 
-                             condition_frames=condition_frames_dropped, 
-                             text_latents=text_latents_dropped,
-                             return_action=return_action,
-                             noisy_action=action_noisy,
-                             action_t=action_t.flatten() if action_t is not None else None)
-        
-        if return_action:
-            x_pred, action_pred = net_output
-        else:
-            x_pred = net_output
-        
-        v_pred = (x_pred - z) / (1 - t).clamp_min(self.t_eps)
-
-        # Image generation loss (L2)
-        # Skip when backbone frozen or action-only mode (saves computation)
+        # Image generation branch (original JiT training path, unchanged)
+        x_pred = None
         loss_image = None
         if not self.freeze_backbone and not self.action_only_loss:
+            x_pred = self.net(
+                z, t.flatten(), y=labels_dropped,
+                condition_frames=condition_frames_dropped,
+                text_latents=text_latents_dropped,
+                return_action=False
+            )
+            v_pred = (x_pred - z) / (1 - t).clamp_min(self.t_eps)
             loss_image = (v - v_pred) ** 2
             loss_image = loss_image.mean(dim=(1, 2, 3)).mean()
 
-        # Action diffusion loss (predict action velocity)
+        # Action diffusion branch:
+        # use clean target frame x as visual condition to match rollout inference.
+        action_pred = None
         loss_action = None
         if action_gt is not None:
+            action_t_flat = action_t.flatten()
+            _x_dummy, action_pred = self.net(
+                x, action_t_flat, y=labels_dropped,
+                condition_frames=condition_frames,
+                text_latents=text_latents_dropped,
+                return_action=True,
+                noisy_action=action_noisy,
+                action_t=action_t_flat
+            )
             loss_action = torch.nn.functional.mse_loss(action_pred, action_v)
         
         # DEBUG: print loss components on first forward pass
