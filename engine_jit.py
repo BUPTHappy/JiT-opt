@@ -211,15 +211,11 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None, dat
                 
                 # Evaluate action prediction if action_gt is available
                 if action_gt is not None:
-                    # Get action prediction from the model
-                    # We need to forward pass with return_action=True
-                    # Use a dummy noisy target_frame for action prediction (similar to training)
-                    t_dummy = torch.zeros(actual_batch_size, device=device)
+                    # Sample action from diffusion action branch conditioned on frames.
                     with torch.no_grad():
-                        _, action_pred = model_without_ddp.net(
-                            target_frame, t_dummy, 
-                            condition_frames=condition_frames,
-                            return_action=True
+                        action_pred = model_without_ddp.generate_action(
+                            target_frame=target_frame,
+                            condition_frames=condition_frames
                         )
                     
                     # Calculate action MSE

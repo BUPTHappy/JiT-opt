@@ -309,7 +309,9 @@ class JiT(nn.Module):
         self.action_horizon = action_horizon
         action_output_dim = action_dim * action_horizon
         self.action_pooler = nn.AdaptiveAvgPool1d(1)  # Global average pooling over sequence dimension
-        self.action_norm = nn.LayerNorm(hidden_size)  # Normalize pooled features before MLP
+        self.action_norm = nn.LayerNorm(hidden_size)  # Normalize fused features before MLP
+        self.action_input_proj = nn.Linear(action_output_dim, hidden_size)
+        self.action_t_embedder = TimestepEmbedder(hidden_size)
         self.action_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
             nn.SiLU(),
@@ -372,7 +374,7 @@ class JiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, x, t, y=None, condition_frames=None, text_latents=None, return_action=False):
+    def forward(self, x, t, y=None, condition_frames=None, text_latents=None, return_action=False, noisy_action=None, action_t=None):
         """
         x: (N, C, H, W)
         t: (N,)
@@ -438,15 +440,22 @@ class JiT(nn.Module):
         elif added_in_context_tokens:
             x = x[:, self.in_context_len:]
         
-        # Extract action features from target_frame (current frame) features
-        # This is more aligned: action_gt corresponds to target_frame moment
-        # Although input is noisy, transformer features contain denoising information
+        # Action diffusion branch:
+        # predict action velocity conditioned on visual features + noisy action + action timestep.
         action_pred = None
         if return_action:
             action_features = self.action_pooler(x.transpose(1, 2))  # (N, hidden_size, 1)
             action_features = action_features.squeeze(-1)  # (N, hidden_size)
-            action_features = self.action_norm(action_features)  # Normalize before MLP
-            action_pred = self.action_head(action_features)  # (N, action_dim * action_horizon)
+            if noisy_action is None:
+                noisy_action = torch.zeros(
+                    x.shape[0], self.action_dim * self.action_horizon, device=x.device, dtype=x.dtype
+                )
+            if action_t is None:
+                action_t = torch.zeros(x.shape[0], device=x.device, dtype=x.dtype)
+            action_features = action_features + self.action_input_proj(noisy_action)
+            action_features = action_features + self.action_t_embedder(action_t)
+            action_features = self.action_norm(action_features)
+            action_pred = self.action_head(action_features)  # (N, action_dim * action_horizon), predicts action velocity
 
         x = self.final_layer(x, c)
         output = self.unpatchify(x, self.patch_size)

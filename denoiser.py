@@ -114,12 +114,24 @@ class Denoiser(nn.Module):
         z = t * x + (1 - t) * e #增加噪声
         v = (x - z) / (1 - t).clamp_min(self.t_eps) #计算速度场
 
+        # Build noisy action target for diffusion-style action training
+        action_noisy = None
+        action_t = None
+        action_v = None
+        if action_gt is not None:
+            action_t = self.sample_t(action_gt.size(0), device=action_gt.device).view(-1, 1)
+            action_e = torch.randn_like(action_gt)
+            action_noisy = action_t * action_gt + (1 - action_t) * action_e
+            action_v = (action_gt - action_noisy) / (1 - action_t).clamp_min(self.t_eps)
+
         # Forward pass with optional action prediction
         return_action = (action_gt is not None)
         net_output = self.net(z, t.flatten(), y=labels_dropped, 
                              condition_frames=condition_frames_dropped, 
                              text_latents=text_latents_dropped,
-                             return_action=return_action)
+                             return_action=return_action,
+                             noisy_action=action_noisy,
+                             action_t=action_t.flatten() if action_t is not None else None)
         
         if return_action:
             x_pred, action_pred = net_output
@@ -135,10 +147,10 @@ class Denoiser(nn.Module):
             loss_image = (v - v_pred) ** 2
             loss_image = loss_image.mean(dim=(1, 2, 3)).mean()
 
-        # Action prediction loss (if action_gt is provided)
+        # Action diffusion loss (predict action velocity)
         loss_action = None
         if action_gt is not None:
-            loss_action = torch.nn.functional.mse_loss(action_pred, action_gt)
+            loss_action = torch.nn.functional.mse_loss(action_pred, action_v)
         
         # DEBUG: print loss components on first forward pass
         if not hasattr(self, '_debug_printed'):
@@ -150,9 +162,9 @@ class Denoiser(nn.Module):
                 print(f"[DEBUG denoiser] action_pred min={action_pred.min().item():.4f}, "
                       f"max={action_pred.max().item():.4f}, "
                       f"mean={action_pred.mean().item():.4f}")
-                print(f"[DEBUG denoiser] action_gt   min={action_gt.min().item():.4f}, "
-                      f"max={action_gt.max().item():.4f}, "
-                      f"mean={action_gt.mean().item():.4f}")
+                print(f"[DEBUG denoiser] action_v    min={action_v.min().item():.4f}, "
+                      f"max={action_v.max().item():.4f}, "
+                      f"mean={action_v.mean().item():.4f}")
 
         # Combined loss
         if self.freeze_backbone or self.action_only_loss:
@@ -213,6 +225,37 @@ class Denoiser(nn.Module):
                            condition_frames=condition_frames,
                            text_latents=text_latents, labels=labels)
         return z
+
+    @torch.no_grad()
+    def generate_action(self, target_frame, condition_frames=None, text_latents=None, labels=None, steps=None):
+        """
+        Diffusion-style action sampling conditioned on visual features.
+        Returns action tensor with shape (B, action_dim * action_horizon).
+        """
+        device = target_frame.device
+        bsz = target_frame.shape[0]
+        steps = self.steps if steps is None else steps
+
+        action_dim_total = self.net.action_dim * self.net.action_horizon
+        a = torch.randn(bsz, action_dim_total, device=device, dtype=target_frame.dtype)
+        timesteps = torch.linspace(0.0, 1.0, steps + 1, device=device)
+
+        for i in range(steps):
+            t_cur = timesteps[i]
+            t_next = timesteps[i + 1]
+            t_batch = torch.full((bsz,), t_cur, device=device, dtype=target_frame.dtype)
+
+            _img_pred, action_v_pred = self.net(
+                target_frame, t_batch, y=labels,
+                condition_frames=condition_frames,
+                text_latents=text_latents,
+                return_action=True,
+                noisy_action=a,
+                action_t=t_batch
+            )
+            a = a + (t_next - t_cur) * action_v_pred
+
+        return a
 
     @torch.no_grad()
     def _forward_sample(self, z, t, condition_frames=None, text_latents=None, labels=None): # 告诉我"从当前状态 z 往哪个方向走"，计算速度场
