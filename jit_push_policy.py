@@ -98,18 +98,17 @@ class JitPushTPolicy(BaseImagePolicy):
         condition_frames = condition_frames * 2.0 - 1.0
         target_frame = target_frame * 2.0 - 1.0
 
-        # Get action prediction from JiT
+        # Get action prediction from JiT diffusion action sampler
         with torch.no_grad():
-            t = torch.ones(B, device=device)  # t=1 means clean frame (no noise)
-            _, action_pred_flat = self.denoiser.net(
-                target_frame,
-                t,
+            action_pred_flat = self.denoiser.generate_action(
+                target_frame=target_frame,
                 condition_frames=condition_frames,
-                return_action=True,
             )  # (B, action_dim * action_horizon)
 
         # Reshape to (B, action_horizon, action_dim)
         action_pred = action_pred_flat.reshape(B, self.action_horizon, self.action_dim)
+        # Keep predictions inside normalized range before denormalization.
+        action_pred = torch.clamp(action_pred, -1.0, 1.0)
 
         # Denormalize each step from [-1, 1] back to original space
         if self.action_stats is not None:
