@@ -152,7 +152,7 @@ class Denoiser(nn.Module):
                 noisy_action=action_noisy,
                 action_t=action_t_flat
             )
-            loss_action = torch.nn.functional.mse_loss(action_pred, action_v)
+            loss_action = torch.nn.functional.mse_loss(action_pred, action_v) #diffusion action loss
         
         # DEBUG: print loss components on first forward pass
         if not hasattr(self, '_debug_printed'):
@@ -176,7 +176,7 @@ class Denoiser(nn.Module):
             else:
                 raise ValueError("action-only mode but no action_gt provided")
         else:
-            # Normal training: combine both losses
+            # Normal training: 合并loss函数，video+action共同监督
             if loss_image is not None and loss_action is not None:
                 loss = loss_image + self.action_loss_weight * loss_action
             elif loss_image is not None:
