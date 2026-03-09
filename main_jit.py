@@ -106,7 +106,7 @@ def get_args_parser():
     parser.add_argument('--action_loss_weight', default=0.1, type=float,
         help='Weight for action prediction loss in multi-task learning')
     parser.add_argument('--freeze_backbone', action='store_true',
-        help='Freeze all parameters except action_head and action_pooler (for fine-tuning)')
+        help='Freeze all parameters except action modules (for fine-tuning)')
     parser.add_argument('--action_only_loss', action='store_true',
         help='Use only action loss (no image loss), all params trainable. For fine-tuning on action data.')
     parser.add_argument('--dataset_names', type=str, default='cup_arrangement_0,towel_folding_0,mouse_arrangement_0',
@@ -401,15 +401,19 @@ def main(args):
         args.start_epoch = 0
         print("Training from scratch")
     
-    # Freeze backbone if requested (only train action_head and action_pooler)
+    # Freeze backbone if requested (only train action modules)
     if args.freeze_backbone:
         print("="*60)
-        print("Freezing backbone parameters, only training action_head and action_pooler")
+        print("Freezing backbone parameters, only training action modules")
         print("="*60)
         frozen_params = 0
         trainable_params = 0
         for name, param in model_without_ddp.named_parameters():
-            if 'action_head' in name or 'action_pooler' in name:
+            if ('action_head' in name
+                or 'action_pooler' in name
+                or 'action_token_proj' in name
+                or 'action_token_posemb' in name
+                or 'action_t_embedder' in name):
                 param.requires_grad = True
                 trainable_params += param.numel()
             else:
@@ -427,7 +431,7 @@ def main(args):
     
     # Set up optimizer with weight decay adjustment for bias and norm layers
     if args.freeze_backbone:
-        # Only optimize trainable parameters (action_head and action_pooler)
+        # Only optimize trainable parameters (action modules)
         trainable_params = [p for p in model_without_ddp.parameters() if p.requires_grad]
         trainable_names = [name for name, p in model_without_ddp.named_parameters() if p.requires_grad]
         
@@ -445,7 +449,7 @@ def main(args):
             {'params': decay, 'weight_decay': args.weight_decay}
         ]
         optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
-        print("Optimizer created with only trainable parameters (action_head and action_pooler)")
+        print("Optimizer created with only trainable parameters (action modules)")
     else:
         param_groups = misc.add_weight_decay(model_without_ddp, args.weight_decay)
         optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))

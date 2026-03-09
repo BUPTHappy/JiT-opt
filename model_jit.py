@@ -290,6 +290,16 @@ class JiT(nn.Module):
             pt_seq_len=hw_seq_len,
             num_cls_token=total_incontext_tokens
         )
+        self.feat_rope_action = VisionRotaryEmbeddingFast(
+            dim=half_head_dim,
+            pt_seq_len=hw_seq_len,
+            num_cls_token=action_horizon
+        )
+        self.feat_rope_incontext_action = VisionRotaryEmbeddingFast(
+            dim=half_head_dim,
+            pt_seq_len=hw_seq_len,
+            num_cls_token=total_incontext_tokens + action_horizon
+        )
 
         # transformer
         self.blocks = nn.ModuleList([
@@ -303,14 +313,14 @@ class JiT(nn.Module):
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
 
         # action prediction head (for video-to-action task)
-        # Compatible with different datasets: UMI (10-dim) and pushT (2-dim)
-        # Supports multi-step prediction: outputs action_dim * action_horizon values
+        # Action diffusion tokens are injected into transformer blocks (scheme A).
         self.action_dim = action_dim
         self.action_horizon = action_horizon
         action_output_dim = action_dim * action_horizon
-        self.action_pooler = nn.AdaptiveAvgPool1d(1)  # Global average pooling over sequence dimension
-        self.action_norm = nn.LayerNorm(hidden_size)  # Normalize fused features before MLP
-        self.action_input_proj = nn.Linear(action_output_dim, hidden_size)
+        self.action_pooler = nn.AdaptiveAvgPool1d(1)
+        self.action_norm = nn.LayerNorm(hidden_size)
+        self.action_token_proj = nn.Linear(action_dim, hidden_size)
+        self.action_token_posemb = nn.Parameter(torch.zeros(1, action_horizon, hidden_size), requires_grad=True)
         self.action_t_embedder = TimestepEmbedder(hidden_size)
         self.action_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
@@ -347,6 +357,9 @@ class JiT(nn.Module):
 
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+        nn.init.normal_(self.action_t_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.action_t_embedder.mlp[2].weight, std=0.02)
+        nn.init.normal_(self.action_token_posemb, std=0.02)
 
         # Zero-out adaLN modulation layers:
         for block in self.blocks:
@@ -412,48 +425,72 @@ class JiT(nn.Module):
             condition_tokens = torch.cat(condition_tokens_list, dim=1)
             condition_len = condition_tokens.shape[1]
 
-        # 跟踪是否实际添加了in_context tokens
+        # Track injected prefix tokens (condition/in-context/action tokens).
         added_in_context_tokens = False
+        action_token_len = 0
+        action_tokens = None
+        if return_action:
+            if noisy_action is None:
+                noisy_action = torch.zeros(
+                    x.shape[0], self.action_dim * self.action_horizon, device=x.device, dtype=x.dtype
+                )
+            noisy_action = noisy_action.view(x.shape[0], self.action_horizon, self.action_dim)
+            action_tokens = self.action_token_proj(noisy_action) + self.action_token_posemb
+            if action_t is None:
+                action_t = torch.zeros(x.shape[0], device=x.device, dtype=x.dtype)
+            action_t_emb = self.action_t_embedder(action_t).unsqueeze(1)
+            action_tokens = action_tokens + action_t_emb
+            action_token_len = action_tokens.shape[1]
+        
+        prefix_len = 0
         
         for i, block in enumerate(self.blocks):
-            if condition_tokens is not None and i == self.in_context_start:
-                x = torch.cat([condition_tokens, x], dim=1)
-            elif self.in_context_len > 0 and i == self.in_context_start and y is not None:
-                y_emb = self.y_embedder(y)
-                in_context_tokens = y_emb.unsqueeze(1).repeat(1, self.in_context_len, 1)
-                in_context_tokens += self.in_context_posemb
-                x = torch.cat([in_context_tokens, x], dim=1)
-                added_in_context_tokens = True
+            if i == self.in_context_start:
+                prefix_tokens = []
+                if action_tokens is not None:
+                    prefix_tokens.append(action_tokens)
+                if condition_tokens is not None:
+                    prefix_tokens.append(condition_tokens)
+                elif self.in_context_len > 0 and y is not None:
+                    y_emb = self.y_embedder(y)
+                    in_context_tokens = y_emb.unsqueeze(1).repeat(1, self.in_context_len, 1)
+                    in_context_tokens += self.in_context_posemb
+                    prefix_tokens.append(in_context_tokens)
+                    added_in_context_tokens = True
+                if len(prefix_tokens) > 0:
+                    prefix_tokens = torch.cat(prefix_tokens, dim=1)
+                    prefix_len = prefix_tokens.shape[1]
+                    x = torch.cat([prefix_tokens, x], dim=1)
             
-            if condition_tokens is not None and i >= self.in_context_start:
-                rope = self.feat_rope_incontext
-            elif self.in_context_len > 0 and i >= self.in_context_start:
-                rope = self.feat_rope_incontext
+            if i >= self.in_context_start and prefix_len > 0:
+                has_incontext = (condition_tokens is not None) or added_in_context_tokens
+                if has_incontext and action_token_len > 0:
+                    rope = self.feat_rope_incontext_action
+                elif has_incontext:
+                    rope = self.feat_rope_incontext
+                elif action_token_len > 0:
+                    rope = self.feat_rope_action
+                else:
+                    rope = self.feat_rope
             else:
                 rope = self.feat_rope
             
             x = block(x, c, rope)
 
-        # 只移除实际添加的tokens
-        if condition_tokens is not None:
-            x = x[:, condition_len:]
-        elif added_in_context_tokens:
-            x = x[:, self.in_context_len:]
+        transformed_action_tokens = None
+        if prefix_len > 0:
+            if action_token_len > 0:
+                transformed_action_tokens = x[:, :action_token_len]
+            x = x[:, prefix_len:]
         
         # Action diffusion branch:
-        # predict action velocity conditioned on visual features + noisy action + action timestep.
+        # predict action velocity from transformer-processed action tokens.
         action_pred = None
         if return_action:
-            action_features = self.action_pooler(x.transpose(1, 2))  # (N, hidden_size, 1)
-            action_features = action_features.squeeze(-1)  # (N, hidden_size)
-            if noisy_action is None:
-                noisy_action = torch.zeros(
-                    x.shape[0], self.action_dim * self.action_horizon, device=x.device, dtype=x.dtype
-                )
-            if action_t is None:
-                action_t = torch.zeros(x.shape[0], device=x.device, dtype=x.dtype)
-            action_features = action_features + self.action_input_proj(noisy_action)
-            action_features = action_features + self.action_t_embedder(action_t)
+            if transformed_action_tokens is None:
+                action_features = self.action_pooler(x.transpose(1, 2)).squeeze(-1)
+            else:
+                action_features = transformed_action_tokens.mean(dim=1)
             action_features = self.action_norm(action_features)
             action_pred = self.action_head(action_features)  # (N, action_dim * action_horizon), predicts action velocity
 
