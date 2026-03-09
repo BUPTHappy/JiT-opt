@@ -5,10 +5,12 @@ PushT zarr format: data/img, data/state, data/action, meta/episode_ends
 """
 
 import os
+import random
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 import zarr
 
 
@@ -25,6 +27,12 @@ class PushTVideoDataset(Dataset):
         seed: int = 42,
         normalize_action: bool = True,
         action_horizon: int = 1,
+        use_augmentation: bool = False,
+        random_crop_pad: int = 4,
+        blur_prob: float = 0.2,
+        blur_kernel_size: int = 5,
+        blur_sigma_min: float = 0.1,
+        blur_sigma_max: float = 1.5,
         **kwargs
     ):
         dataset_path = os.path.expanduser(dataset_path)
@@ -52,6 +60,14 @@ class PushTVideoDataset(Dataset):
         self.split = split
         self.normalize_action = normalize_action
         self.action_horizon = action_horizon
+        self.use_augmentation = bool(use_augmentation and split == "train")
+        self.random_crop_pad = max(0, int(random_crop_pad))
+        self.blur_prob = float(blur_prob)
+        self.blur_kernel_size = int(blur_kernel_size)
+        if self.blur_kernel_size % 2 == 0:
+            self.blur_kernel_size += 1
+        self.blur_sigma_min = float(blur_sigma_min)
+        self.blur_sigma_max = float(max(blur_sigma_min, blur_sigma_max))
 
         zarr_store = zarr.open(zarr_path, mode="r")
         if "data" not in zarr_store or "img" not in zarr_store["data"]:
@@ -106,6 +122,12 @@ class PushTVideoDataset(Dataset):
         print(f"  action_horizon={action_horizon}, normalize_action={normalize_action}")
         if normalize_action and self.action_stats is not None:
             print(f"  action_min={self.action_stats['min']}, action_max={self.action_stats['max']}")
+        if self.use_augmentation:
+            print(
+                f"  augmentation: random_crop_pad={self.random_crop_pad}, "
+                f"blur_prob={self.blur_prob}, blur_kernel={self.blur_kernel_size}, "
+                f"blur_sigma=({self.blur_sigma_min}, {self.blur_sigma_max})"
+            )
 
     def __len__(self):
         return len(self.index_pool)
@@ -156,8 +178,35 @@ class PushTVideoDataset(Dataset):
                 mode="bilinear", align_corners=False
             ).squeeze(0)
 
+        if self.use_augmentation:
+            condition_frames, target_frame = self._augment_frames(condition_frames, target_frame)
+
         return {
             "condition_frames": condition_frames,
             "target_frame": target_frame,
             "action": torch.from_numpy(action).float(),
         }
+
+    def _augment_frames(self, condition_frames: torch.Tensor, target_frame: torch.Tensor):
+        """
+        Apply temporally-consistent augmentation on condition+target frames.
+        Inputs are in [-1, 1], shape:
+          condition_frames: (K, C, H, W), target_frame: (C, H, W)
+        """
+        frames = torch.cat([condition_frames, target_frame.unsqueeze(0)], dim=0)  # (K+1, C, H, W)
+
+        # Random crop with reflection padding (UVA-style lightweight augmentation).
+        if self.random_crop_pad > 0:
+            pad = self.random_crop_pad
+            frames = F.pad(frames, (pad, pad, pad, pad), mode="reflect")
+            _, _, hp, wp = frames.shape
+            top = random.randint(0, hp - self.image_size)
+            left = random.randint(0, wp - self.image_size)
+            frames = frames[:, :, top:top + self.image_size, left:left + self.image_size]
+
+        # Random Gaussian blur applied consistently across the frame stack.
+        if self.blur_prob > 0 and random.random() < self.blur_prob:
+            sigma = random.uniform(self.blur_sigma_min, self.blur_sigma_max)
+            frames = TF.gaussian_blur(frames, kernel_size=self.blur_kernel_size, sigma=sigma)
+
+        return frames[:-1], frames[-1]

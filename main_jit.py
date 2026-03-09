@@ -119,6 +119,18 @@ def get_args_parser():
                         help='Action dimension per step (default 10 for UMI, 2 for pushT)')
     parser.add_argument('--action_horizon', type=int, default=1,
                         help='Number of future action steps to predict (1=single-step, 8=multi-step)')
+    parser.add_argument('--pusht_use_augmentation', action='store_true',
+                        help='Enable PushT training augmentation (random crop + blur)')
+    parser.add_argument('--pusht_random_crop_pad', type=int, default=4,
+                        help='Padding size for PushT random crop augmentation')
+    parser.add_argument('--pusht_blur_prob', type=float, default=0.2,
+                        help='Probability of Gaussian blur in PushT augmentation')
+    parser.add_argument('--pusht_blur_kernel_size', type=int, default=5,
+                        help='Kernel size for PushT Gaussian blur augmentation (odd number)')
+    parser.add_argument('--pusht_blur_sigma_min', type=float, default=0.1,
+                        help='Minimum sigma for PushT Gaussian blur')
+    parser.add_argument('--pusht_blur_sigma_max', type=float, default=1.5,
+                        help='Maximum sigma for PushT Gaussian blur')
     parser.add_argument('--eval_pusht_success', action='store_true',
                         help='When action_dim=2, run pushT env evaluation for success rate (requires UVA)')
     parser.add_argument('--pusht_normalizer_path', type=str, default='',
@@ -221,6 +233,12 @@ def main(args):
                 image_size=args.img_size,
                 split='train',
                 action_horizon=getattr(args, 'action_horizon', 1),
+                use_augmentation=getattr(args, 'pusht_use_augmentation', False),
+                random_crop_pad=getattr(args, 'pusht_random_crop_pad', 4),
+                blur_prob=getattr(args, 'pusht_blur_prob', 0.2),
+                blur_kernel_size=getattr(args, 'pusht_blur_kernel_size', 5),
+                blur_sigma_min=getattr(args, 'pusht_blur_sigma_min', 0.1),
+                blur_sigma_max=getattr(args, 'pusht_blur_sigma_max', 1.5),
             )
         else:
             from dataset.umi_video_dataset import UmiVideoDataset
