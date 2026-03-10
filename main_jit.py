@@ -139,6 +139,8 @@ def get_args_parser():
                         help='Path to pushT zarr for fitting normalizer (optional)')
     parser.add_argument('--pusht_wandb_video', action='store_true',
                         help='Log PushT rollout videos to wandb (like UVA)')
+    parser.add_argument('--pusht_rollout_action_steps', type=int, default=8,
+                        help='Number of actions executed per policy rollout chunk in PushT eval')
 
     # wandb
     parser.add_argument('--wandb', action='store_true',

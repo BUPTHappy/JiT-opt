@@ -432,9 +432,11 @@ def run_pusht_success_eval(model_without_ddp, args, epoch, log_writer=None):
 
     action_stats = getattr(args, '_action_stats', None)
 
+    rollout_action_steps = int(getattr(args, "pusht_rollout_action_steps", 8))
+
     policy = JitPushTPolicy(
         denoiser=model_without_ddp,
-        n_action_steps=8,
+        n_action_steps=rollout_action_steps,
         max_condition_frames=getattr(args, "max_condition_frames", 2),
         img_size=getattr(args, "img_size", 256),
         action_dim=getattr(args, "action_dim", 2),
@@ -460,7 +462,7 @@ def run_pusht_success_eval(model_without_ddp, args, epoch, log_writer=None):
         test_start_seed=100000,
         max_steps=300,
         n_obs_steps=16,
-        n_action_steps=8,
+        n_action_steps=rollout_action_steps,
         fps=10,
         render_size=96,
         past_action=False,
