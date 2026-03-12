@@ -39,6 +39,7 @@ class Denoiser(nn.Module):
         
         # action prediction weight (for multi-task learning)
         self.action_loss_weight = getattr(args, 'action_loss_weight', 0.1)
+        self.action_self_condition_prob = getattr(args, 'action_self_condition_prob', 0.0)
         self.freeze_backbone = getattr(args, 'freeze_backbone', False)
         self.action_only_loss = getattr(args, 'action_only_loss', False)  # action-only fine-tune, all params trainable
 
@@ -143,9 +144,16 @@ class Denoiser(nn.Module):
         action_pred = None
         loss_action = None
         if action_gt is not None:
+            action_condition_x = x
+            # Light self-forcing: occasionally replace GT target frame with model prediction
+            # so action branch learns robustness under imperfect context.
+            if (self.training and self.action_self_condition_prob > 0.0 and x_pred is not None
+                    and torch.rand(1, device=x.device).item() < self.action_self_condition_prob):
+                action_condition_x = x_pred.detach()
+
             action_t_flat = action_t.flatten()
             _x_dummy, action_pred = self.net(
-                x, action_t_flat, y=labels_dropped,
+                action_condition_x, action_t_flat, y=labels_dropped,
                 condition_frames=condition_frames,
                 text_latents=text_latents_dropped,
                 return_action=True,

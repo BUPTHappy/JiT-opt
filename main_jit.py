@@ -105,6 +105,8 @@ def get_args_parser():
         help='Use condition frames instead of labels')
     parser.add_argument('--action_loss_weight', default=0.1, type=float,
         help='Weight for action prediction loss in multi-task learning')
+    parser.add_argument('--action_self_condition_prob', default=0.0, type=float,
+        help='Probability of using model-predicted frame as action condition during training (light self-forcing)')
     parser.add_argument('--freeze_backbone', action='store_true',
         help='Freeze all parameters except action modules (for fine-tuning)')
     parser.add_argument('--action_only_loss', action='store_true',
