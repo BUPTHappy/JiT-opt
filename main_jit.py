@@ -531,18 +531,32 @@ def main(args):
             torch.cuda.empty_cache()
 
             # PushT success rate evaluation (action_dim=2 only).
-            # Important for DDP: all ranks must stay in sync while rank0 runs env rollout.
+            # DDP note: PushT env rollout can exceed NCCL collective timeout.
+            # Use a file-based rendezvous to keep ranks in sync without collectives.
             if getattr(args, 'eval_pusht_success', False) and getattr(args, 'action_dim', 10) == 2:
-                if torch.distributed.is_initialized():
-                    torch.distributed.barrier()
+                sync_file = os.path.join(args.output_dir, f".pusht_eval_done_epoch_{epoch}.sync")
                 if misc.is_main_process():
+                    if os.path.exists(sync_file):
+                        os.remove(sync_file)
                     try:
                         from engine_jit import run_pusht_success_eval
                         run_pusht_success_eval(model_without_ddp, args, epoch, log_writer)
                     except Exception as e:
                         print(f"PushT success eval skipped: {e}")
-                if torch.distributed.is_initialized():
-                    torch.distributed.barrier()
+                    finally:
+                        try:
+                            with open(sync_file, "w", encoding="utf-8") as f:
+                                f.write("done\n")
+                        except Exception:
+                            pass
+                elif torch.distributed.is_initialized():
+                    # Wait for rank0 to finish PushT eval without triggering NCCL timeout.
+                    wait_s = 0
+                    while not os.path.exists(sync_file):
+                        time.sleep(2)
+                        wait_s += 2
+                        if wait_s % 120 == 0:
+                            print(f"[rank {misc.get_rank()}] waiting PushT eval sync ({wait_s}s)")
 
         if misc.is_main_process() and log_writer is not None:
             log_writer.flush()
