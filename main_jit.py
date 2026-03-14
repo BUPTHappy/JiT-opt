@@ -530,13 +530,19 @@ def main(args):
                 evaluate(model_without_ddp, args, epoch, batch_size=args.gen_bsz, log_writer=log_writer, data_loader_val=data_loader_val)
             torch.cuda.empty_cache()
 
-            # PushT success rate evaluation (action_dim=2 only)
-            if getattr(args, 'eval_pusht_success', False) and getattr(args, 'action_dim', 10) == 2 and misc.is_main_process():
-                try:
-                    from engine_jit import run_pusht_success_eval
-                    run_pusht_success_eval(model_without_ddp, args, epoch, log_writer)
-                except Exception as e:
-                    print(f"PushT success eval skipped: {e}")
+            # PushT success rate evaluation (action_dim=2 only).
+            # Important for DDP: all ranks must stay in sync while rank0 runs env rollout.
+            if getattr(args, 'eval_pusht_success', False) and getattr(args, 'action_dim', 10) == 2:
+                if torch.distributed.is_initialized():
+                    torch.distributed.barrier()
+                if misc.is_main_process():
+                    try:
+                        from engine_jit import run_pusht_success_eval
+                        run_pusht_success_eval(model_without_ddp, args, epoch, log_writer)
+                    except Exception as e:
+                        print(f"PushT success eval skipped: {e}")
+                if torch.distributed.is_initialized():
+                    torch.distributed.barrier()
 
         if misc.is_main_process() and log_writer is not None:
             log_writer.flush()
