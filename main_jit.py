@@ -596,6 +596,7 @@ def main(args):
             # Use a file-based rendezvous to keep ranks in sync without collectives.
             if getattr(args, 'eval_pusht_success', False) and getattr(args, 'action_dim', 10) == 2:
                 sync_file = os.path.join(args.output_dir, f".pusht_eval_done_epoch_{epoch}.sync")
+                sync_start_ts = time.time()
                 if misc.is_main_process():
                     if os.path.exists(sync_file):
                         os.remove(sync_file)
@@ -613,7 +614,14 @@ def main(args):
                 elif torch.distributed.is_initialized():
                     # Wait for rank0 to finish PushT eval without triggering NCCL timeout.
                     wait_s = 0
-                    while not os.path.exists(sync_file):
+                    while True:
+                        if os.path.exists(sync_file):
+                            try:
+                                # Ignore stale sync files from previous failed runs.
+                                if os.path.getmtime(sync_file) >= sync_start_ts:
+                                    break
+                            except OSError:
+                                pass
                         time.sleep(2)
                         wait_s += 2
                         if wait_s % 120 == 0:
@@ -621,6 +629,7 @@ def main(args):
 
             if getattr(args, 'eval_libero_success', False) and getattr(args, 'dataset_type', 'umi') == 'libero10':
                 sync_file = os.path.join(args.output_dir, f".libero_eval_done_epoch_{epoch}.sync")
+                sync_start_ts = time.time()
                 if misc.is_main_process():
                     if os.path.exists(sync_file):
                         os.remove(sync_file)
@@ -637,7 +646,14 @@ def main(args):
                             pass
                 elif torch.distributed.is_initialized():
                     wait_s = 0
-                    while not os.path.exists(sync_file):
+                    while True:
+                        if os.path.exists(sync_file):
+                            try:
+                                # Ignore stale sync files from previous failed runs.
+                                if os.path.getmtime(sync_file) >= sync_start_ts:
+                                    break
+                            except OSError:
+                                pass
                         time.sleep(2)
                         wait_s += 2
                         if wait_s % 120 == 0:
