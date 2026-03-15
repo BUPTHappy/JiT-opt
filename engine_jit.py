@@ -524,6 +524,11 @@ def run_libero_success_eval(model_without_ddp, args, epoch, log_writer=None):
     # Keep wandb step scale consistent with train_one_epoch (epoch_1000x).
     wandb_step = int((epoch + 1) * 1000)
 
+    # Avoid namespace collision: JiT has util.misc, UVA/LIBERO may also import util.misc.
+    # Purge these entries before importing UVA stack so it resolves its own modules.
+    _saved_util_pkg = sys.modules.pop("util", None)
+    _saved_util_misc = sys.modules.pop("util.misc", None)
+
     from uva_path_utils import ensure_uva_on_sys_path
     ensure_uva_on_sys_path(anchor_file=__file__, prepend=True)
 
@@ -618,3 +623,12 @@ def run_libero_success_eval(model_without_ddp, args, epoch, log_writer=None):
                 pass
     finally:
         model_without_ddp.load_state_dict(model_state_dict)
+        # Restore JiT util modules for the remaining training loop.
+        if _saved_util_pkg is not None:
+            sys.modules["util"] = _saved_util_pkg
+        else:
+            sys.modules.pop("util", None)
+        if _saved_util_misc is not None:
+            sys.modules["util.misc"] = _saved_util_misc
+        else:
+            sys.modules.pop("util.misc", None)
