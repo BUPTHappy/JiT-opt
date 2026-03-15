@@ -525,7 +525,7 @@ def run_libero_success_eval(model_without_ddp, args, epoch, log_writer=None):
     wandb_step = int((epoch + 1) * 1000)
 
     from uva_path_utils import ensure_uva_on_sys_path
-    ensure_uva_on_sys_path(anchor_file=__file__)
+    ensure_uva_on_sys_path(anchor_file=__file__, prepend=True)
 
     from jit_libero_policy import JitLiberoPolicy
     from unified_video_action.env_runner.libero_image_runner import LiberoImageRunner

@@ -12,7 +12,7 @@ import torch.nn.functional as F
 
 from uva_path_utils import ensure_uva_on_sys_path
 
-ensure_uva_on_sys_path(anchor_file=__file__)
+ensure_uva_on_sys_path(anchor_file=__file__, prepend=True)
 
 from unified_video_action.policy.base_image_policy import BaseImagePolicy
 

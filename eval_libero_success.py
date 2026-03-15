@@ -18,7 +18,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 from uva_path_utils import ensure_uva_on_sys_path
-ensure_uva_on_sys_path(anchor_file=__file__)
+ensure_uva_on_sys_path(anchor_file=__file__, prepend=True)
 
 from denoiser import Denoiser
 from jit_libero_policy import JitLiberoPolicy

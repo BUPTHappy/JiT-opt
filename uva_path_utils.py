@@ -49,9 +49,18 @@ def resolve_uva_root(anchor_file: Optional[str] = None) -> Optional[str]:
     return None
 
 
-def ensure_uva_on_sys_path(anchor_file: Optional[str] = None) -> Optional[str]:
+def ensure_uva_on_sys_path(
+    anchor_file: Optional[str] = None,
+    prepend: bool = False,
+) -> Optional[str]:
     root = resolve_uva_root(anchor_file=anchor_file)
-    if root and root not in sys.path:
-        # append to avoid overriding local modules unexpectedly
-        sys.path.append(root)
+    if root:
+        if root in sys.path:
+            # keep only one entry; optionally move to front
+            sys.path = [p for p in sys.path if p != root]
+        if prepend:
+            sys.path.insert(0, root)
+        else:
+            # append to avoid overriding local modules unexpectedly
+            sys.path.append(root)
     return root
