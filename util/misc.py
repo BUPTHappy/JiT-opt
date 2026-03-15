@@ -11,6 +11,10 @@ import torch.distributed as dist
 
 #分布式训练中相关工具函数
 
+# Expose a stable module-level print symbol for serializers (e.g. dill)
+# that resolve function globals via "util.misc.print".
+print = builtins.print
+
 
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a
@@ -173,6 +177,8 @@ def setup_for_distributed(is_master):
             builtin_print(*args, **kwargs)
 
     builtins.print = print
+    # Keep module attribute in sync so dill can resolve util.misc.print.
+    globals()["print"] = print
 
 
 def is_dist_avail_and_initialized():
