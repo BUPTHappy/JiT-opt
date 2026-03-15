@@ -112,9 +112,9 @@ def get_args_parser():
     parser.add_argument('--action_only_loss', action='store_true',
         help='Use only action loss (no image loss), all params trainable. For fine-tuning on action data.')
     parser.add_argument('--dataset_names', type=str, default='cup_arrangement_0,towel_folding_0,mouse_arrangement_0',
-                        help='Comma-separated list of dataset names (UMI) or single name for PushT (e.g. pusht_cchi_v7_replay)')
-    parser.add_argument('--dataset_type', type=str, default='umi', choices=['umi', 'pusht'],
-                        help='Dataset type: umi or pusht')
+                        help='Comma-separated dataset names: UMI zarr names, PushT zarr name, or LIBERO hdf5 basenames (optional)')
+    parser.add_argument('--dataset_type', type=str, default='umi', choices=['umi', 'pusht', 'libero10'],
+                        help='Dataset type: umi, pusht, or libero10')
     parser.add_argument('--used_episode_indices_file', type=str, default='',
                         help='JSON file specifying which episodes to use (optional)')
     parser.add_argument('--action_dim', type=int, default=10,
@@ -135,6 +135,38 @@ def get_args_parser():
                         help='Maximum sigma for PushT Gaussian blur')
     parser.add_argument('--eval_pusht_success', action='store_true',
                         help='When action_dim=2, run pushT env evaluation for success rate (requires UVA)')
+    parser.add_argument('--eval_libero_success', action='store_true',
+                        help='Run LIBERO simulation evaluation during online eval (requires UVA+LIBERO)')
+    parser.add_argument('--libero_n_train', type=int, default=1,
+                        help='LIBERO eval: number of train episodes per task')
+    parser.add_argument('--libero_n_train_vis', type=int, default=0,
+                        help='LIBERO eval: number of train episodes with video')
+    parser.add_argument('--libero_n_test', type=int, default=3,
+                        help='LIBERO eval: number of test episodes per task')
+    parser.add_argument('--libero_n_test_vis', type=int, default=0,
+                        help='LIBERO eval: number of test episodes with video')
+    parser.add_argument('--libero_max_steps', type=int, default=500,
+                        help='LIBERO eval: max env steps')
+    parser.add_argument('--libero_n_obs_steps', type=int, default=16,
+                        help='LIBERO eval: observation horizon')
+    parser.add_argument('--libero_n_action_steps', type=int, default=8,
+                        help='LIBERO eval: action chunk size')
+    parser.add_argument('--libero_test_start_seed', type=int, default=100000,
+                        help='LIBERO eval: first test seed')
+    parser.add_argument('--libero_fps', type=int, default=10,
+                        help='LIBERO eval: rollout video FPS')
+    parser.add_argument('--libero_use_augmentation', action='store_true',
+                        help='Enable LIBERO training augmentation (random crop + blur)')
+    parser.add_argument('--libero_random_crop_pad', type=int, default=4,
+                        help='Padding size for LIBERO random crop augmentation')
+    parser.add_argument('--libero_blur_prob', type=float, default=0.2,
+                        help='Probability of Gaussian blur in LIBERO augmentation')
+    parser.add_argument('--libero_blur_kernel_size', type=int, default=5,
+                        help='Kernel size for LIBERO Gaussian blur augmentation (odd number)')
+    parser.add_argument('--libero_blur_sigma_min', type=float, default=0.1,
+                        help='Minimum sigma for LIBERO Gaussian blur')
+    parser.add_argument('--libero_blur_sigma_max', type=float, default=1.5,
+                        help='Maximum sigma for LIBERO Gaussian blur')
     parser.add_argument('--pusht_normalizer_path', type=str, default='',
                         help='Path to normalizer.pkl for pushT eval (optional)')
     parser.add_argument('--pusht_dataset_path', type=str, default='',
@@ -244,6 +276,23 @@ def main(args):
                 blur_sigma_min=getattr(args, 'pusht_blur_sigma_min', 0.1),
                 blur_sigma_max=getattr(args, 'pusht_blur_sigma_max', 1.5),
             )
+        elif dataset_type == 'libero10':
+            from dataset.libero10_video_dataset import Libero10VideoDataset
+            dataset_names = [name.strip() for name in args.dataset_names.split(',') if name.strip()]
+            dataset_train = Libero10VideoDataset(
+                dataset_root_dir=args.data_path,
+                max_condition_frames=args.max_condition_frames,
+                image_size=args.img_size,
+                split='train',
+                action_horizon=getattr(args, 'action_horizon', 1),
+                dataset_names=dataset_names if len(dataset_names) > 0 else None,
+                use_augmentation=getattr(args, 'libero_use_augmentation', False),
+                random_crop_pad=getattr(args, 'libero_random_crop_pad', 4),
+                blur_prob=getattr(args, 'libero_blur_prob', 0.2),
+                blur_kernel_size=getattr(args, 'libero_blur_kernel_size', 5),
+                blur_sigma_min=getattr(args, 'libero_blur_sigma_min', 0.1),
+                blur_sigma_max=getattr(args, 'libero_blur_sigma_max', 1.5),
+            )
         else:
             from dataset.umi_video_dataset import UmiVideoDataset
             dataset_names = [name.strip() for name in args.dataset_names.split(',') if name.strip()]
@@ -300,7 +349,19 @@ def main(args):
                 split='val',
                 action_horizon=getattr(args, 'action_horizon', 1),
             )
+        elif dataset_type == 'libero10':
+            from dataset.libero10_video_dataset import Libero10VideoDataset
+            dataset_names = [name.strip() for name in args.dataset_names.split(',') if name.strip()]
+            dataset_val = Libero10VideoDataset(
+                dataset_root_dir=args.data_path,
+                max_condition_frames=args.max_condition_frames,
+                image_size=args.img_size,
+                split='val',
+                action_horizon=getattr(args, 'action_horizon', 1),
+                dataset_names=dataset_names if len(dataset_names) > 0 else None,
+            )
         else:
+            from dataset.umi_video_dataset import UmiVideoDataset
             dataset_names = [name.strip() for name in args.dataset_names.split(',') if name.strip()]
             dataset_val = UmiVideoDataset(
                 dataset_root_dir=args.data_path,
@@ -557,6 +618,30 @@ def main(args):
                         wait_s += 2
                         if wait_s % 120 == 0:
                             print(f"[rank {misc.get_rank()}] waiting PushT eval sync ({wait_s}s)")
+
+            if getattr(args, 'eval_libero_success', False) and getattr(args, 'dataset_type', 'umi') == 'libero10':
+                sync_file = os.path.join(args.output_dir, f".libero_eval_done_epoch_{epoch}.sync")
+                if misc.is_main_process():
+                    if os.path.exists(sync_file):
+                        os.remove(sync_file)
+                    try:
+                        from engine_jit import run_libero_success_eval
+                        run_libero_success_eval(model_without_ddp, args, epoch, log_writer)
+                    except Exception as e:
+                        print(f"LIBERO eval skipped: {e}")
+                    finally:
+                        try:
+                            with open(sync_file, "w", encoding="utf-8") as f:
+                                f.write("done\n")
+                        except Exception:
+                            pass
+                elif torch.distributed.is_initialized():
+                    wait_s = 0
+                    while not os.path.exists(sync_file):
+                        time.sleep(2)
+                        wait_s += 2
+                        if wait_s % 120 == 0:
+                            print(f"[rank {misc.get_rank()}] waiting LIBERO eval sync ({wait_s}s)")
 
         if misc.is_main_process() and log_writer is not None:
             log_writer.flush()

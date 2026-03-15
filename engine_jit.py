@@ -515,3 +515,111 @@ def run_pusht_success_eval(model_without_ddp, args, epoch, log_writer=None):
             wandb.log(runner_log, step=wandb_step)
         except Exception:
             pass
+
+
+def run_libero_success_eval(model_without_ddp, args, epoch, log_writer=None):
+    """
+    Run LIBERO simulation evaluation for JiT checkpoints.
+    Requires unified_video_action + LIBERO environment dependencies.
+    """
+    import glob
+
+    # Keep wandb step scale consistent with train_one_epoch (epoch_1000x).
+    wandb_step = int((epoch + 1) * 1000)
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    uva_root = os.path.join(script_dir, "..", "unified_video_action")
+    if uva_root not in sys.path:
+        sys.path.append(uva_root)
+
+    from jit_libero_policy import JitLiberoPolicy
+    from unified_video_action.env_runner.libero_image_runner import LiberoImageRunner
+
+    output_dir = os.path.join(getattr(args, "output_dir", "./output_dir"), "libero_eval")
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Switch to EMA for eval
+    model_state_dict = copy.deepcopy(model_without_ddp.state_dict())
+    ema_state_dict = copy.deepcopy(model_without_ddp.state_dict())
+    for i, (name, _) in enumerate(model_without_ddp.named_parameters()):
+        ema_state_dict[name] = model_without_ddp.ema_params1[i]
+    model_without_ddp.load_state_dict(ema_state_dict)
+
+    try:
+        dataset_dir = getattr(args, "data_path", "")
+        hdf5_files = sorted(glob.glob(os.path.join(dataset_dir, "*.hdf5")))
+        if len(hdf5_files) == 0:
+            raise ValueError(f"No .hdf5 files found under {dataset_dir}")
+
+        img_size = int(getattr(args, "img_size", 128))
+        shape_meta = {
+            "image_resolution": img_size,
+            "action": {"shape": [10]},
+            "obs": {
+                "agentview_image": {"shape": [3, img_size, img_size], "type": "rgb"},
+            },
+        }
+
+        policy = JitLiberoPolicy(
+            denoiser=model_without_ddp,
+            n_action_steps=int(getattr(args, "libero_n_action_steps", 8)),
+            max_condition_frames=int(getattr(args, "max_condition_frames", 2)),
+            img_size=img_size,
+            action_dim=int(getattr(args, "action_dim", 10)),
+            action_horizon=int(getattr(args, "action_horizon", 1)),
+            action_stats=getattr(args, "_action_stats", None),
+            device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        )
+        policy.eval()
+
+        step_log = {}
+        for task_file in hdf5_files:
+            env_runner = LiberoImageRunner(
+                task_dir=task_file,
+                output_dir=output_dir,
+                dataset_path=dataset_dir,
+                shape_meta=shape_meta,
+                n_train=int(getattr(args, "libero_n_train", 1)),
+                n_train_vis=int(getattr(args, "libero_n_train_vis", 0)),
+                n_test=int(getattr(args, "libero_n_test", 3)),
+                n_test_vis=int(getattr(args, "libero_n_test_vis", 0)),
+                test_start_seed=int(getattr(args, "libero_test_start_seed", 100000)),
+                max_steps=int(getattr(args, "libero_max_steps", 500)),
+                n_obs_steps=int(getattr(args, "libero_n_obs_steps", 16)),
+                n_action_steps=int(getattr(args, "libero_n_action_steps", 8)),
+                render_obs_key="agentview_image",
+                fps=int(getattr(args, "libero_fps", 10)),
+                crf=22,
+                past_action=False,
+                abs_action=True,
+                tqdm_interval_sec=1.0,
+                n_envs=None,
+            )
+            runner_log = env_runner.run(policy)
+            step_log.update(runner_log)
+
+        all_test = [v for k, v in step_log.items() if "test/" in k and "_mean_score" in k]
+        all_train = [v for k, v in step_log.items() if "train/" in k and "_mean_score" in k]
+        test_mean = float(np.mean(all_test)) if all_test else None
+        train_mean = float(np.mean(all_train)) if all_train else None
+        print(f"LIBERO test mean score: {test_mean}, train mean score: {train_mean}")
+
+        if log_writer is not None and test_mean is not None:
+            log_writer.add_scalar("libero_test_mean_score", test_mean, epoch)
+        if log_writer is not None and train_mean is not None:
+            log_writer.add_scalar("libero_train_mean_score", train_mean, epoch)
+
+        if getattr(args, "_use_wandb", False):
+            try:
+                import wandb
+                payload = {}
+                if test_mean is not None:
+                    payload["libero_test_mean_score"] = test_mean
+                if train_mean is not None:
+                    payload["libero_train_mean_score"] = train_mean
+                if payload:
+                    wandb.log(payload, step=wandb_step)
+            except Exception:
+                pass
+    finally:
+        model_without_ddp.load_state_dict(model_state_dict)

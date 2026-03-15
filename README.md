@@ -140,6 +140,50 @@ to evaluate FID and IS against a reference image folder or statistics. You can u
 to prepare the reference image folder, or directly use our pre-computed reference stats
 under ```fid_stats```.
 
+### LIBERO-10 Training and Eval (JiT-opt extension)
+
+The repo also supports LIBERO-10 video+action training via `--dataset_type libero10`.
+`--data_path` should point to a folder with LIBERO task `.hdf5` files (same layout as UVA `data/libero_10`).
+
+Training example:
+```
+torchrun --nproc_per_node=8 main_jit.py \
+--model JiT-B/16 \
+--img_size 128 \
+--batch_size 32 \
+--blr 5e-5 \
+--epochs 3050 \
+--warmup_epochs 5 \
+--use_condition_frames \
+--dataset_type libero10 \
+--data_path data/libero_10 \
+--action_dim 10 \
+--action_horizon 8 \
+--dataset_names '' \
+--online_eval \
+--eval_freq 50 \
+--num_images 4096 \
+--gen_bsz 32 \
+--output_dir ./outputs/jit_libero10
+```
+
+Online rollout evaluation in LIBERO simulator can be enabled during training:
+```
+--eval_libero_success \
+--libero_n_test 3 \
+--libero_n_action_steps 8
+```
+
+Standalone rollout evaluation:
+```
+python eval_libero_success.py \
+--checkpoint ./outputs/jit_libero10/checkpoint-last.pth \
+--dataset_path data/libero_10 \
+--output_dir ./outputs/jit_libero10_eval \
+--img_size 128 \
+--action_dim 10
+```
+
 ### Acknowledgements
 
 We thank Google TPU Research Cloud (TRC) for granting us access to TPUs, and the MIT
