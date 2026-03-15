@@ -10,10 +10,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-# Add UVA path for imports
-_UVA_ROOT = os.path.join(os.path.dirname(__file__), '..', 'unified_video_action')
-if os.path.exists(_UVA_ROOT) and _UVA_ROOT not in sys.path:
-    sys.path.append(_UVA_ROOT)
+from uva_path_utils import ensure_uva_on_sys_path
+
+# Add UVA path for imports (supports unified_video_action or uva-bo repo name).
+ensure_uva_on_sys_path(anchor_file=__file__)
 
 from unified_video_action.policy.base_image_policy import BaseImagePolicy
 from unified_video_action.model.common.normalizer import LinearNormalizer

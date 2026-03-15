@@ -26,9 +26,11 @@ def _register_jpegxl_codec():
     # 方法1: 尝试从UVA导入并注册（推荐方法）
     try:
         import sys
-        uva_path = os.path.join(os.path.dirname(__file__), '../../unified_video_action')
-        if os.path.exists(uva_path):
-            sys.path.insert(0, uva_path)
+        from uva_path_utils import resolve_uva_root
+        uva_path = resolve_uva_root(anchor_file=__file__)
+        if uva_path is not None:
+            if uva_path not in sys.path:
+                sys.path.append(uva_path)
             from unified_video_action.codecs.imagecodecs_numcodecs import register_codecs
             # 尝试注册所有codecs（UVA的register_codecs会处理JPEGXL不可用的情况）
             register_codecs(codecs=None, force=False, verbose=False)

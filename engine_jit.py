@@ -394,11 +394,8 @@ def run_pusht_success_eval(model_without_ddp, args, epoch, log_writer=None):
     Uses JitPushTPolicy and PushTImageRunner from UVA.
     """
     import pickle
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    uva_root = os.path.join(script_dir, "..", "unified_video_action")
-
-    if uva_root not in sys.path:
-        sys.path.append(uva_root)  # append, not insert, to avoid overriding JiT's util.misc
+    from uva_path_utils import ensure_uva_on_sys_path
+    ensure_uva_on_sys_path(anchor_file=__file__)
 
     from jit_push_policy import JitPushTPolicy
     from unified_video_action.env_runner.pusht_image_runner import PushTImageRunner
@@ -527,10 +524,8 @@ def run_libero_success_eval(model_without_ddp, args, epoch, log_writer=None):
     # Keep wandb step scale consistent with train_one_epoch (epoch_1000x).
     wandb_step = int((epoch + 1) * 1000)
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    uva_root = os.path.join(script_dir, "..", "unified_video_action")
-    if uva_root not in sys.path:
-        sys.path.append(uva_root)
+    from uva_path_utils import ensure_uva_on_sys_path
+    ensure_uva_on_sys_path(anchor_file=__file__)
 
     from jit_libero_policy import JitLiberoPolicy
     from unified_video_action.env_runner.libero_image_runner import LiberoImageRunner
