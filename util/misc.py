@@ -11,6 +11,14 @@ import torch.distributed as dist
 
 #分布式训练中相关工具函数
 
+
+# Compatibility shim:
+# Some external stacks (e.g. LIBERO / related utils) may call util.misc.print(...).
+# When launching from JiT-opt, this module can shadow their util.misc import.
+# Provide a module-level print symbol to avoid runtime attribute errors.
+def print(*args, **kwargs):
+    builtins.print(*args, **kwargs)
+
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a
     window or the global series average.
