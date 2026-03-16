@@ -41,6 +41,17 @@ def get_args():
     parser.add_argument("--action_dim", type=int, default=10)
     parser.add_argument("--action_horizon", type=int, default=None)
     parser.add_argument("--use_ema", action="store_true", default=True)
+    parser.add_argument(
+        "--disable_uva_image_transform",
+        action="store_true",
+        help="Disable rot180+hflip image transform in JitLiberoPolicy.",
+    )
+    parser.add_argument(
+        "--task_filter",
+        type=str,
+        default="",
+        help="Only evaluate tasks whose .hdf5 filename contains this substring.",
+    )
 
     # Env runner args (aligned with UVA libero10 defaults)
     parser.add_argument("--n_train", type=int, default=1)
@@ -213,11 +224,16 @@ def main():
         action_dim=args.action_dim,
         action_horizon=action_horizon,
         action_stats=action_stats,
+        match_uva_image_transform=not args.disable_uva_image_transform,
         device=device,
     )
+    print(f"Policy image transform enabled: {not args.disable_uva_image_transform}")
     policy.eval()
 
     task_files = sorted(glob.glob(os.path.join(args.dataset_path, "*.hdf5")))
+    if args.task_filter:
+        task_files = [p for p in task_files if args.task_filter in os.path.basename(p)]
+        print(f"Task filter: '{args.task_filter}', matched {len(task_files)} files")
     if not task_files:
         raise ValueError(f"No .hdf5 files found in {args.dataset_path}")
 
