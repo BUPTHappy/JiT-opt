@@ -67,6 +67,7 @@ class Libero10VideoDataset(Dataset):
         action_horizon: int = 1,
         dataset_names: Optional[List[str]] = None,
         image_obs_key: str = "agentview_rgb",
+        match_uva_image_transform: bool = True,
         use_augmentation: bool = False,
         random_crop_pad: int = 4,
         blur_prob: float = 0.2,
@@ -90,6 +91,7 @@ class Libero10VideoDataset(Dataset):
         self.normalize_action = bool(normalize_action)
         self.action_horizon = int(action_horizon)
         self.image_obs_key = image_obs_key
+        self.match_uva_image_transform = bool(match_uva_image_transform)
         self.use_augmentation = bool(use_augmentation and split == "train")
         self.random_crop_pad = max(0, int(random_crop_pad))
         self.blur_prob = float(blur_prob)
@@ -231,6 +233,15 @@ class Libero10VideoDataset(Dataset):
 
         condition_t = torch.from_numpy(condition).float().permute(0, 3, 1, 2) / 127.5 - 1.0
         target_t = torch.from_numpy(target).float().permute(2, 0, 1) / 127.5 - 1.0
+
+        # Match UVA LIBERO preprocessing:
+        # rotate 180deg in image plane then horizontal flip.
+        # This aligns replayed hdf5 frames with environment camera convention.
+        if self.match_uva_image_transform:
+            condition_t = torch.rot90(condition_t, k=2, dims=(-2, -1))
+            condition_t = torch.flip(condition_t, dims=(-1,))
+            target_t = torch.rot90(target_t, k=2, dims=(-2, -1))
+            target_t = torch.flip(target_t, dims=(-1,))
 
         h, w = target.shape[:2]
         if h != self.image_size or w != self.image_size:

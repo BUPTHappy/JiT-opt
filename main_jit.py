@@ -167,6 +167,8 @@ def get_args_parser():
                         help='Minimum sigma for LIBERO Gaussian blur')
     parser.add_argument('--libero_blur_sigma_max', type=float, default=1.5,
                         help='Maximum sigma for LIBERO Gaussian blur')
+    parser.add_argument('--libero_no_uva_image_transform', action='store_true',
+                        help='Disable UVA-style LIBERO image transform (rot180 + hflip)')
     parser.add_argument('--pusht_normalizer_path', type=str, default='',
                         help='Path to normalizer.pkl for pushT eval (optional)')
     parser.add_argument('--pusht_dataset_path', type=str, default='',
@@ -286,6 +288,7 @@ def main(args):
                 split='train',
                 action_horizon=getattr(args, 'action_horizon', 1),
                 dataset_names=dataset_names if len(dataset_names) > 0 else None,
+                match_uva_image_transform=not getattr(args, 'libero_no_uva_image_transform', False),
                 use_augmentation=getattr(args, 'libero_use_augmentation', False),
                 random_crop_pad=getattr(args, 'libero_random_crop_pad', 4),
                 blur_prob=getattr(args, 'libero_blur_prob', 0.2),
@@ -359,6 +362,7 @@ def main(args):
                 split='val',
                 action_horizon=getattr(args, 'action_horizon', 1),
                 dataset_names=dataset_names if len(dataset_names) > 0 else None,
+                match_uva_image_transform=not getattr(args, 'libero_no_uva_image_transform', False),
             )
         else:
             from dataset.umi_video_dataset import UmiVideoDataset

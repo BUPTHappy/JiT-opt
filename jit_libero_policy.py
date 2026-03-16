@@ -27,6 +27,7 @@ class JitLiberoPolicy(BaseImagePolicy):
         action_dim: int = 10,
         action_horizon: Optional[int] = None,
         action_stats: Optional[dict] = None,
+        match_uva_image_transform: bool = True,
         device=None,
     ):
         super().__init__()
@@ -39,6 +40,7 @@ class JitLiberoPolicy(BaseImagePolicy):
             action_horizon = getattr(denoiser.net, "action_horizon", 1)
         self.action_horizon = int(action_horizon)
         self.action_stats = action_stats
+        self.match_uva_image_transform = bool(match_uva_image_transform)
         self._device = device or next(denoiser.parameters()).device
 
     def set_normalizer(self, normalizer):
@@ -78,6 +80,14 @@ class JitLiberoPolicy(BaseImagePolicy):
         else:
             condition_frames = image[:, -1:].repeat(1, n_cond, 1, 1, 1)
         target_frame = image[:, -1]
+
+        # Match LIBERO training preprocessing in dataset/libero10_video_dataset.py:
+        # rotate 180deg then horizontal flip.
+        if self.match_uva_image_transform:
+            condition_frames = torch.rot90(condition_frames, k=2, dims=(-2, -1))
+            condition_frames = torch.flip(condition_frames, dims=(-1,))
+            target_frame = torch.rot90(target_frame, k=2, dims=(-2, -1))
+            target_frame = torch.flip(target_frame, dims=(-1,))
 
         # Resize to JiT input resolution if needed.
         if h != self.img_size or w != self.img_size:
