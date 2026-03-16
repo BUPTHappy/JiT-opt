@@ -42,6 +42,7 @@ class JitLiberoPolicy(BaseImagePolicy):
         self.action_stats = action_stats
         self.match_uva_image_transform = bool(match_uva_image_transform)
         self._device = device or next(denoiser.parameters()).device
+        self._logged_image_range = False
 
     def set_normalizer(self, normalizer):
         # JiT uses min/max action stats for now; keep API compatibility.
@@ -101,10 +102,24 @@ class JitLiberoPolicy(BaseImagePolicy):
                 target_frame, size=(self.img_size, self.img_size), mode="bilinear", align_corners=False
             )
 
-        # Convert [0, 1] -> [-1, 1].
-        if image.max() <= 1.5 and image.min() >= -0.5:
+        # Normalize to [-1, 1].
+        # Robomimic/UVA observations can be either float in [0,1] or uint8-like in [0,255].
+        img_min = float(image.min().item())
+        img_max = float(image.max().item())
+        if img_max > 1.5:
+            # assume [0,255]
+            condition_frames = condition_frames / 127.5 - 1.0
+            target_frame = target_frame / 127.5 - 1.0
+        else:
+            # assume [0,1]
             condition_frames = condition_frames * 2.0 - 1.0
             target_frame = target_frame * 2.0 - 1.0
+
+        if not self._logged_image_range:
+            print(
+                f"[JitLiberoPolicy] obs range before norm: [{img_min:.3f}, {img_max:.3f}]"
+            )
+            self._logged_image_range = True
 
         with torch.no_grad():
             action_pred_flat = self.denoiser.generate_action(
