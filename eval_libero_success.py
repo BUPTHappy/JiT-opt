@@ -11,7 +11,9 @@ import os
 import sys
 from typing import Dict, List
 
+import h5py
 import numpy as np
+import scipy.spatial.transform as st
 import torch
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,7 +37,7 @@ def get_args():
     # Model args
     parser.add_argument("--model", type=str, default="JiT-B/16")
     parser.add_argument("--img_size", type=int, default=128)
-    parser.add_argument("--max_condition_frames", type=int, default=2)
+    parser.add_argument("--max_condition_frames", type=int, default=None)
     parser.add_argument("--action_dim", type=int, default=10)
     parser.add_argument("--action_horizon", type=int, default=None)
     parser.add_argument("--use_ema", action="store_true", default=True)
@@ -69,8 +71,62 @@ def _load_action_stats_from_ckpt(ckpt: dict):
     return None
 
 
+def _axis_angle_to_rot6d(axis_angle: np.ndarray) -> np.ndarray:
+    rot = st.Rotation.from_rotvec(axis_angle)
+    rot_mat = rot.as_matrix()  # (..., 3, 3)
+    return rot_mat[..., :2, :].reshape(axis_angle.shape[:-1] + (6,))
+
+
+def _convert_action_to_10d(action: np.ndarray) -> np.ndarray:
+    if action.shape[-1] == 10:
+        return action.astype(np.float32)
+    if action.shape[-1] != 7:
+        raise ValueError(f"Expected action dim 7 or 10, got {action.shape[-1]}")
+    pos = action[..., :3]
+    rot6d = _axis_angle_to_rot6d(action[..., 3:6])
+    gripper = action[..., 6:]
+    return np.concatenate([pos, rot6d, gripper], axis=-1).astype(np.float32)
+
+
+def _compute_action_stats_from_libero_dataset(dataset_path: str):
+    if not dataset_path or not os.path.isdir(dataset_path):
+        return None
+    task_files = sorted(glob.glob(os.path.join(dataset_path, "*.hdf5")))
+    if not task_files:
+        return None
+
+    all_actions = []
+    for task_file in task_files:
+        with h5py.File(task_file, "r") as f:
+            if "data" not in f:
+                continue
+            for demo_key in f["data"].keys():
+                demo = f["data"][demo_key]
+                if "actions" not in demo:
+                    continue
+                a = demo["actions"][:].astype(np.float32)
+                all_actions.append(_convert_action_to_10d(a))
+
+    if not all_actions:
+        return None
+    stacked = np.concatenate(all_actions, axis=0)
+    return {
+        "min": stacked.min(axis=0),
+        "max": stacked.max(axis=0),
+    }
+
+
 def _load_model(args, checkpoint_path: str, device: torch.device):
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+    max_condition_frames = args.max_condition_frames
+    if max_condition_frames is None:
+        if "args" in ckpt and hasattr(ckpt["args"], "max_condition_frames"):
+            max_condition_frames = int(ckpt["args"].max_condition_frames)
+            print(f"Using max_condition_frames from checkpoint: {max_condition_frames}")
+        else:
+            max_condition_frames = 2
+            print("Using default max_condition_frames=2")
 
     action_horizon = args.action_horizon
     if action_horizon is None:
@@ -82,7 +138,7 @@ def _load_model(args, checkpoint_path: str, device: torch.device):
     model_args = argparse.Namespace(
         model=args.model,
         img_size=args.img_size,
-        max_condition_frames=args.max_condition_frames,
+        max_condition_frames=max_condition_frames,
         text_latent_dim=512,
         use_text_condition=False,
         action_dim=args.action_dim,
@@ -124,7 +180,21 @@ def _load_model(args, checkpoint_path: str, device: torch.device):
         print(f"Unexpected keys: {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
 
     action_stats = _load_action_stats_from_ckpt(ckpt)
-    return denoiser, action_horizon, action_stats
+    if action_stats is not None:
+        print(
+            "Loaded action stats from checkpoint: "
+            f"min={np.array(action_stats['min'])}, max={np.array(action_stats['max'])}"
+        )
+    else:
+        action_stats = _compute_action_stats_from_libero_dataset(args.dataset_path)
+        if action_stats is not None:
+            print(
+                "Computed action stats from dataset: "
+                f"min={action_stats['min']}, max={action_stats['max']}"
+            )
+        else:
+            print("WARNING: No action stats found. Policy will output raw [-1,1] action scale.")
+    return denoiser, action_horizon, max_condition_frames, action_stats
 
 
 def main():
@@ -132,11 +202,13 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
-    denoiser, action_horizon, action_stats = _load_model(args, args.checkpoint, device)
+    denoiser, action_horizon, max_condition_frames, action_stats = _load_model(
+        args, args.checkpoint, device
+    )
     policy = JitLiberoPolicy(
         denoiser=denoiser,
         n_action_steps=args.n_action_steps,
-        max_condition_frames=args.max_condition_frames,
+        max_condition_frames=max_condition_frames,
         img_size=args.img_size,
         action_dim=args.action_dim,
         action_horizon=action_horizon,
