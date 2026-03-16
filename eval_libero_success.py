@@ -52,6 +52,8 @@ def get_args():
         default="",
         help="Only evaluate tasks whose .hdf5 filename contains this substring.",
     )
+    parser.add_argument("--debug_action_stats", action="store_true")
+    parser.add_argument("--debug_max_calls", type=int, default=5)
 
     # Env runner args (aligned with UVA libero10 defaults)
     parser.add_argument("--n_train", type=int, default=1)
@@ -225,6 +227,8 @@ def main():
         action_horizon=action_horizon,
         action_stats=action_stats,
         match_uva_image_transform=not args.disable_uva_image_transform,
+        debug_action_stats=args.debug_action_stats,
+        debug_max_calls=args.debug_max_calls,
         device=device,
     )
     print(f"Policy image transform enabled: {not args.disable_uva_image_transform}")

@@ -28,6 +28,8 @@ class JitLiberoPolicy(BaseImagePolicy):
         action_horizon: Optional[int] = None,
         action_stats: Optional[dict] = None,
         match_uva_image_transform: bool = True,
+        debug_action_stats: bool = False,
+        debug_max_calls: int = 5,
         device=None,
     ):
         super().__init__()
@@ -43,6 +45,9 @@ class JitLiberoPolicy(BaseImagePolicy):
         self.match_uva_image_transform = bool(match_uva_image_transform)
         self._device = device or next(denoiser.parameters()).device
         self._logged_image_range = False
+        self.debug_action_stats = bool(debug_action_stats)
+        self.debug_max_calls = int(max(1, debug_max_calls))
+        self._debug_calls = 0
 
     def set_normalizer(self, normalizer):
         # JiT uses min/max action stats for now; keep API compatibility.
@@ -138,5 +143,18 @@ class JitLiberoPolicy(BaseImagePolicy):
         else:
             pad = action_pred[:, -1:].expand(-1, self.n_action_steps - self.action_horizon, -1)
             action_pred = torch.cat([action_pred, pad], dim=1)
+
+        if self.debug_action_stats and self._debug_calls < self.debug_max_calls:
+            a = action_pred[0]  # (T, 10)
+            pos = a[:, :3]
+            rot6d = a[:, 3:9]
+            grip = a[:, 9:10]
+            print(
+                "[JitLiberoPolicy] action stats "
+                f"pos[min,max]=({pos.min().item():.4f},{pos.max().item():.4f}) "
+                f"rot6d[min,max]=({rot6d.min().item():.4f},{rot6d.max().item():.4f}) "
+                f"grip[min,max]=({grip.min().item():.4f},{grip.max().item():.4f})"
+            )
+            self._debug_calls += 1
 
         return {"action": action_pred}
