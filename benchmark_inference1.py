@@ -21,6 +21,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         "Policy-level inference benchmark",
         parents=[base],
+        conflict_handler="resolve",
         add_help=True,
     )
     parser.add_argument(
