@@ -140,13 +140,12 @@ class Denoiser(nn.Module):
             loss_image = loss_image.mean(dim=(1, 2, 3)).mean()
 
         # Action diffusion branch:
-        # use clean target frame x as visual condition to match rollout inference.
+        # 默认：use clean target frame x as visual condition to match rollout inference.
         action_pred = None
         loss_action = None
         if action_gt is not None:
             action_condition_x = x
-            # Light self-forcing: occasionally replace GT target frame with model prediction
-            # so action branch learns robustness under imperfect context.
+            #  self-forcing: 按照一定的概率用模型预测的帧作为条件帧
             if (self.training and self.action_self_condition_prob > 0.0 and x_pred is not None
                     and torch.rand(1, device=x.device).item() < self.action_self_condition_prob):
                 action_condition_x = x_pred.detach()
